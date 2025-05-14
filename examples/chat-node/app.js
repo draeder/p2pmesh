@@ -8,6 +8,9 @@ const signalingServerUrl = 'ws://localhost:8080';
 // Remove manual peer ID generation - let the library handle it
 let mesh;
 
+// Set to track disconnected peers to prevent duplicate disconnect messages
+const disconnectedPeers = new Set();
+
 console.log(`Node.js P2PMesh Example - Starting...`);
 
 async function main() {
@@ -63,6 +66,8 @@ async function main() {
     // Custom event handling for Node.js example
     mesh.on('peer:connect', (peerId) => {
       console.log(`MESH EVENT: Connected to peer: ${peerId}`);
+      // Reset the disconnected state when a peer connects/reconnects
+      disconnectedPeers.delete(peerId);
       // Try sending a message upon connection
       setTimeout(() => {
         // Format consistent with browser example, using a structured message
@@ -74,7 +79,11 @@ async function main() {
     });
 
     mesh.on('peer:disconnect', (peerId) => {
-      console.log(`MESH EVENT: Disconnected from peer: ${peerId}`);
+      // Add tracking to prevent duplicate disconnect messages
+      if (!disconnectedPeers.has(peerId)) {
+        disconnectedPeers.add(peerId);
+        console.log(`MESH EVENT: Disconnected from peer: ${peerId}`);
+      }
     });
     
     // Handler for the new peer eviction event
@@ -160,11 +169,19 @@ async function main() {
           });
           peerInstance.on('close', () => {
             console.log(`Peer: Connection closed with ${targetPeerId}`);
-            mesh.emit('peer:disconnect', targetPeerId);
+            // Only emit the event if the peer hasn't been marked as disconnected
+            if (!disconnectedPeers.has(targetPeerId)) {
+              disconnectedPeers.add(targetPeerId);
+              mesh.emit('peer:disconnect', targetPeerId);
+            }
           });
           peerInstance.on('error', (err) => {
             console.error(`Peer: Error with ${targetPeerId}: ${err.message || err}`);
-            mesh.emit('peer:disconnect', targetPeerId); // Treat error as disconnect for simplicity
+            // Only emit the event if the peer hasn't been marked as disconnected
+            if (!disconnectedPeers.has(targetPeerId)) {
+              disconnectedPeers.add(targetPeerId);
+              mesh.emit('peer:disconnect', targetPeerId); // Treat error as disconnect for simplicity
+            }
           });
           peerInstance._nodeListenersAttached = true;
         }

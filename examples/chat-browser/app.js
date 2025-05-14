@@ -12,6 +12,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const signalingServerUrl = 'ws://localhost:8080';
   let mesh;
+  
+  // Set to track disconnected peers to prevent duplicate disconnect messages
+  const disconnectedPeers = new Set();
 
   myPeerIdEl.textContent = 'Initializing ID...';
   statusEl.textContent = 'Status: Initializing...';
@@ -76,19 +79,29 @@ document.addEventListener('DOMContentLoaded', () => {
       mesh.on('peer:connect', (peerId) => {
         addMessage(`Connected to peer: ${peerId}`, 'system');
         statusEl.textContent = `Status: Connected to peer ${peerId}. Mesh active.`;
+        // Reset the disconnected state when a peer connects/reconnects
+        disconnectedPeers.delete(peerId);
         updateConnectedPeersList();
       });
 
       mesh.on('peer:disconnect', (peerId) => {
-        addMessage(`Disconnected from peer: ${peerId}`, 'system');
-        statusEl.textContent = 'Status: Peer disconnected. Mesh active.';
-        updateConnectedPeersList();
+        // Add tracking to prevent duplicate disconnect messages
+        if (!disconnectedPeers.has(peerId)) {
+          disconnectedPeers.add(peerId);
+          addMessage(`Disconnected from peer: ${peerId}`, 'system');
+          statusEl.textContent = 'Status: Peer disconnected. Mesh active.';
+          updateConnectedPeersList();
+        }
       });
 
       mesh.on('peer:timeout', (peerId) => {
-        addMessage(`Connection to peer ${peerId} timed out after ${CONNECTION_TIMEOUT/1000} seconds`, 'system');
-        statusEl.textContent = 'Status: Peer connection timed out. Mesh active.';
-        updateConnectedPeersList();
+        // Add tracking to prevent duplicate timeout/disconnect messages
+        if (!disconnectedPeers.has(peerId)) {
+          disconnectedPeers.add(peerId);
+          addMessage(`Connection to peer ${peerId} timed out after ${CONNECTION_TIMEOUT/1000} seconds`, 'system');
+          statusEl.textContent = 'Status: Peer connection timed out. Mesh active.';
+          updateConnectedPeersList();
+        }
       });
 
       mesh.on('message', ({ from, data }) => {
@@ -126,6 +139,8 @@ document.addEventListener('DOMContentLoaded', () => {
             peer.on('connect', () => {
               console.log(`UI: Connected to peer: ${remotePeerId}`);
               addMessage(`Successfully established connection with ${remotePeerId}.`, 'system');
+              // Reset the disconnected state when a peer connects/reconnects
+              disconnectedPeers.delete(remotePeerId);
               mesh.emit('peer:connect', remotePeerId);
               updateConnectedPeersList();
             });
@@ -157,13 +172,21 @@ document.addEventListener('DOMContentLoaded', () => {
             });
             peer.on('close', () => {
               console.log(`UI: Connection closed with peer: ${remotePeerId}`);
-              mesh.emit('peer:disconnect', remotePeerId);
+              // Only emit the event if the peer hasn't been marked as disconnected
+              if (!disconnectedPeers.has(remotePeerId)) {
+                disconnectedPeers.add(remotePeerId);
+                mesh.emit('peer:disconnect', remotePeerId);
+              }
               updateConnectedPeersList();
             });
             peer.on('error', (err) => {
               console.error(`UI: Error with peer ${remotePeerId}:`, err);
               addMessage(`Error with peer ${remotePeerId}: ${err.message}`, 'system');
-              mesh.emit('peer:disconnect', remotePeerId);
+              // Only emit the event if the peer hasn't been marked as disconnected
+              if (!disconnectedPeers.has(remotePeerId)) {
+                disconnectedPeers.add(remotePeerId);
+                mesh.emit('peer:disconnect', remotePeerId); // Treat error as disconnect for simplicity
+              }
               updateConnectedPeersList();
             });
           }
