@@ -70,7 +70,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
       mesh = await createMesh({
         transport,
-        maxPeers: 5,
+        maxPeers: 3,
         iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
       });
 
