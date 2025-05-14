@@ -30,6 +30,7 @@
   "license": "MIT",
   "dependencies": {
     "simple-peer": "^9.11.1",
+    "@koush/wrtc": "^0.5.3",
     "ws": "^8.18.0"
   },
   "devDependencies": {}

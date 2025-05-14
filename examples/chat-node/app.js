@@ -1,19 +1,14 @@
 // examples/chat-node/app.js
 import { createMesh } from '../../src/index.js';
 import { WebSocketTransport } from '../../src/transports/websocket-transport.js';
-import WebSocket from 'ws'; // Import 'ws' for Node.js WebSocket client
-
-// Polyfill WebSocket for Node.js environment if not globally available for the library
-// This is often needed if the library expects a browser-like WebSocket global.
-if (typeof global.WebSocket === 'undefined') {
-  global.WebSocket = WebSocket;
-}
+// Removed WebSocket import - WebSocketTransport handles platform detection
+// Removed crypto import as we'll let the library handle ID generation
 
 const signalingServerUrl = 'ws://localhost:8080';
-const localPeerId = `node-${Math.random().toString(36).substring(2, 9)}`;
+// Remove manual peer ID generation - let the library handle it
 let mesh;
 
-console.log(`Node.js P2PMesh Example - My Peer ID: ${localPeerId}`);
+console.log(`Node.js P2PMesh Example - Starting...`);
 
 async function main() {
   try {
@@ -32,12 +27,36 @@ async function main() {
       console.error('Transport Error:', err.message || err);
     });
 
-    mesh = createMesh({
-      peerId: localPeerId,
+    // Properly await the createMesh function to ensure it's fully initialized
+    mesh = await createMesh({
+      // Removed peerId parameter to let the library handle ID generation
       transport: transport,
       maxPeers: 3, // Example: limit to 3 peers for the Node.js client
       iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] // Public STUN server
     });
+    
+    // Override internal mesh protocol logging functions to suppress verbose output
+    // This monkey-patches the mesh object to clean up console output for end users
+    const originalConsoleLog = console.log;
+    console.log = function() {
+      // Filter out internal gossip protocol messages unless DEBUG mode is enabled
+      const message = arguments[0];
+      if (typeof message === 'string' && 
+          (message.includes('Gossip:') || 
+           message.includes('Broadcasting message on topic') ||
+           message.includes('tracking delivery'))) {
+        // Only show these messages if DEBUG is enabled
+        if (process.env.DEBUG) {
+          originalConsoleLog.apply(console, arguments);
+        }
+      } else {
+        // Pass through all other messages normally
+        originalConsoleLog.apply(console, arguments);
+      }
+    };
+    
+    // Store original function to restore on exit
+    process.originalConsoleLog = originalConsoleLog;
 
     console.log(`Mesh created with Peer ID: ${mesh.peerId}`);
 
@@ -46,7 +65,11 @@ async function main() {
       console.log(`MESH EVENT: Connected to peer: ${peerId}`);
       // Try sending a message upon connection
       setTimeout(() => {
-        mesh.send(peerId, `Hello from Node.js peer ${localPeerId}!`);
+        // Format consistent with browser example, using a structured message
+        mesh.send(peerId, JSON.stringify({
+          type: 'direct',
+          payload: `Hello from Node.js peer ${mesh.peerId}!`
+        }));
       }, 1000);
     });
 
@@ -64,6 +87,11 @@ async function main() {
       } catch (e) {
         // If not JSON, use as is
       }
+      
+      // If parsedData is an object, convert it to a readable string
+      if (typeof parsedData === 'object' && parsedData !== null) {
+        parsedData = JSON.stringify(parsedData, null, 2);
+      }
       console.log(`MESH EVENT: Message from ${from}: ${parsedData}`);
     });
     
@@ -75,42 +103,60 @@ async function main() {
         const peerInstance = mesh.peers.get(targetPeerId);
         if (!peerInstance._nodeListenersAttached) {
           peerInstance.on('connect', () => {
-            console.log(`Peer Instance: Successfully established connection with ${targetPeerId}.`);
+            console.log(`Peer: Connected to peer: ${targetPeerId}`);
             mesh.emit('peer:connect', targetPeerId); // Ensure mesh event fires
           });
           peerInstance.on('data', (d) => {
             const dataString = d.toString();
-            // Only log internal messages for debugging, don't emit them to UI
-            console.log(`Peer Instance: Raw data from ${targetPeerId}: ${dataString}`);
+            // Handle data without excessive logging
+            // Only log for debugging if needed
+            if (process.env.DEBUG) {
+              console.log(`Peer Instance: Raw data from ${targetPeerId}: ${dataString}`);
+            }
             
-            // Filter out internal protocol messages (gossip_ack) from UI
+            // Filter out internal protocol messages from UI
             try {
               const parsedData = JSON.parse(dataString);
               
-              // Only filter out specific internal protocol messages
+              // Filter out all internal protocol messages
               if (parsedData.type === 'gossip_ack') {
-                console.log(`Node: Filtered out internal gossip_ack message from ${targetPeerId}`);
+                if (process.env.DEBUG) {
+                  console.log(`Filtered internal gossip_ack message from ${targetPeerId}`);
+                }
                 return; // Don't forward acknowledgments to application layer
               }
               
-              // Make sure to explicitly pass through broadcast messages
-              if (parsedData.type === 'gossip' || parsedData.type === 'broadcast' || 
-                 (parsedData.payload && typeof parsedData.payload === 'string')) {
-                console.log(`Node: Passing through broadcast/gossip message from ${targetPeerId}`);
+              // Filter gossip protocol messages except actual chat messages
+              if (parsedData.type === 'gossip') {
+                if (process.env.DEBUG) {
+                  console.log(`Processing gossip message on topic: ${parsedData.topic}`);
+                }
+                
+                if (parsedData.topic !== 'chat_message') {
+                  return; // Filter out non-chat gossip messages
+                }
+              }
+              
+              // Process broadcast messages without logging delivery details
+              if ((parsedData.type === 'broadcast' && parsedData.topic === 'chat_message') ||
+                  parsedData.type === 'direct') {
+                // Only pass through chat-related messages
               }
             } catch (e) {
-              // If not JSON, continue with raw data
-              console.log(`Node: Non-JSON data from ${targetPeerId}, passing through`);
+              // If not JSON, continue with raw data but only log in debug mode
+              if (process.env.DEBUG) {
+                console.log(`Node: Non-JSON data from ${targetPeerId}, passing through`);
+              }
             }
             
             mesh.emit('message', { from: targetPeerId, data: dataString });
           });
           peerInstance.on('close', () => {
-            console.log(`Peer Instance: Connection closed with ${targetPeerId}.`);
+            console.log(`Peer: Connection closed with ${targetPeerId}`);
             mesh.emit('peer:disconnect', targetPeerId);
           });
           peerInstance.on('error', (err) => {
-            console.error(`Peer Instance: Error with ${targetPeerId}:`, err.message || err);
+            console.error(`Peer: Error with ${targetPeerId}: ${err.message || err}`);
             mesh.emit('peer:disconnect', targetPeerId); // Treat error as disconnect for simplicity
           });
           peerInstance._nodeListenersAttached = true;
@@ -120,15 +166,17 @@ async function main() {
 
     await mesh.join();
     console.log('Mesh joined. Waiting for peers or messages...');
-
-    // Example: Periodically try to send a broadcast message if peers are connected
-    setInterval(() => {
-      if (mesh && mesh.peers.size > 0) {
-        const message = `Node.js broadcast message at ${new Date().toLocaleTimeString()}`;
-        console.log(`Sending broadcast: "${message}"`);
-        mesh.sendBroadcast('node_chat', message);
-      }
-    }, 15000); // Broadcast every 15 seconds
+    
+    // Subscribe to the same 'chat_message' topic as browser clients to ensure consistency
+    mesh.subscribe('chat_message', (message) => {
+      // Properly handle message object to display actual content instead of [object Object]
+      const messageContent = typeof message === 'object' ? JSON.stringify(message) : message;
+      console.log(`MESH EVENT: Received broadcast chat message: ${messageContent}`);
+    });
+    
+    // Removed periodic broadcasting as it's redundant with the gossip protocol
+    // The gossip protocol already handles message propagation through the network
+    // If you want to test broadcasting, you can manually trigger it or implement a command-based approach instead
 
   } catch (error) {
     console.error('Failed to initialize P2PMesh in Node.js:', error);
@@ -142,6 +190,11 @@ process.on('SIGINT', async () => {
   if (mesh) {
     await mesh.leave();
     console.log('Mesh left.');
+  }
+  // Restore original console.log function before exit
+  if (process.originalConsoleLog) {
+    console.log = process.originalConsoleLog;
+    console.log('Logging restored.');
   }
   process.exit(0);
 });

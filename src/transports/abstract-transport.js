@@ -3,6 +3,18 @@
 /**
  * Abstract Transport Layer
  * Defines the interface for transport mechanisms used for signaling.
+ * 
+ * Transport implementations should emit the following standard events:
+ * - 'signal': When a WebRTC signal is received from another peer
+ * - 'connect_request': When another peer requests a connection
+ * - 'peer_joined': When a new peer joins the network
+ * - 'peer_left': When a peer leaves the network
+ * - 'error': When an error occurs
+ * - 'ack': When an acknowledgment is received
+ * - 'bootstrap_peers': When a list of bootstrap peers is received
+ * - 'kademlia_rpc_message': When a Kademlia RPC message is received
+ * - 'open': When the transport connection is opened
+ * - 'close': When the transport connection is closed
  */
 export class AbstractTransport {
   constructor() {
@@ -63,11 +75,30 @@ export class AbstractTransport {
   }
 
   /**
-   * (Optional) Method to discover peers, e.g., via bootstrap servers.
+   * Sends a Kademlia RPC message to a specific peer.
+   * @param {string} toPeerId - The Kademlia ID of the recipient peer.
+   * @param {object} kademliaRpcMessage - The Kademlia RPC message to send.
+   * @returns {Promise<object>} A promise that resolves with the Kademlia RPC reply or rejects on error/timeout.
+   */
+  sendKademliaRpc(toPeerId, kademliaRpcMessage) {
+    throw new Error('Method "sendKademliaRpc()" must be implemented.');
+  }
+
+  /**
+   * Gets the address information for a peer.
+   * @param {string} peerId - The ID of the peer.
+   * @returns {string|object} The address information for the peer.
+   */
+  getPeerAddress(peerId) {
+    throw new Error('Method "getPeerAddress()" must be implemented.');
+  }
+  
+  /**
+   * Method to discover peers, e.g., via bootstrap servers.
    * This method's signature and behavior can vary greatly depending on the transport.
    * @param {Array<string>} bootstrapUrls - URLs or identifiers for discovery points.
    */
-  // discoverPeers(bootstrapUrls) {
-  //   console.warn('discoverPeers() not implemented by this transport');
-  // }
+  discoverPeers(bootstrapUrls) {
+    console.warn('discoverPeers() not implemented by this transport');
+  }
 }

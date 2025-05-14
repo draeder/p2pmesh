@@ -6,7 +6,7 @@ import { GossipProtocol } from './gossip.js'; // Added GossipProtocol import
 
 let Peer;
 
-// Function to load SimplePeer dynamically
+// Function to load SimplePeer dynamically with WebRTC implementation for Node.js
 async function loadSimplePeer() {
   if (typeof window !== 'undefined' && typeof window.document !== 'undefined') {
     // Browser environment
@@ -43,8 +43,35 @@ async function loadSimplePeer() {
     }
   } else {
     // Node.js environment
-    const SimplePeerModule = await import('simple-peer');
-    Peer = SimplePeerModule.default || SimplePeerModule; // Handles both CJS and ESM exports
+    try {
+      // Try to load the WebRTC implementation for Node.js
+      const wrtc = await import('@koush/wrtc').catch(e => {
+        console.warn('Optional @koush/wrtc package not available, SimplePeer will use defaults:', e.message);
+        return null;
+      });
+      
+      // Load simple-peer with wrtc implementation if available
+      const SimplePeerModule = await import('simple-peer');
+      Peer = SimplePeerModule.default || SimplePeerModule; // Handles both CJS and ESM exports
+      
+      // Inject wrtc implementation if loaded successfully
+      if (wrtc && wrtc.default) {
+        console.log('Using @koush/wrtc for WebRTC in Node.js environment');
+        // Create a modified SimplePeer constructor that includes wrtc by default
+        const OriginalPeer = Peer;
+        Peer = function(opts) {
+          return new OriginalPeer({
+            ...opts,
+            wrtc: wrtc.default
+          });
+        };
+        // Copy over static properties and methods
+        Object.assign(Peer, OriginalPeer);
+      }
+    } catch (e) {
+      console.error('Failed to load simple-peer in Node.js environment:', e);
+      throw new Error('SimplePeer could not be loaded in Node.js environment.');
+    }
   }
   if (!Peer) {
     throw new Error('SimplePeer failed to load.');
@@ -87,20 +114,29 @@ export async function createMesh(options = {}) {
 
   if (!localPeerId) {
     const randomString = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
-    if (typeof window !== 'undefined' && window.crypto && window.crypto.subtle) {
-      const encoder = new TextEncoder();
-      const data = encoder.encode(randomString);
-      const hashBuffer = await window.crypto.subtle.digest('SHA-1', data);
-      const hashArray = Array.from(new Uint8Array(hashBuffer));
-      localPeerId = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-    } else {
-      try {
-        const { createHash } = await import('crypto');
-        localPeerId = createHash('sha1').update(randomString).digest('hex');
-      } catch (e) {
-        console.error('Failed to load crypto module for SHA-1 generation:', e);
-        localPeerId = 'fallback-' + kademliaGenerateNodeId(); // Use Kademlia's generator as a fallback if SHA-1 fails
+    try {
+      // Dynamic SHA-1 generation based on environment
+      if (typeof window !== 'undefined' && window.crypto && window.crypto.subtle) {
+        // Browser environment with SubtleCrypto API
+        const encoder = new TextEncoder();
+        const data = encoder.encode(randomString);
+        const hashBuffer = await window.crypto.subtle.digest('SHA-1', data);
+        const hashArray = Array.from(new Uint8Array(hashBuffer));
+        localPeerId = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+      } else {
+        // Node.js environment - dynamically import crypto
+        try {
+          const { createHash } = await import('crypto');
+          localPeerId = createHash('sha1').update(randomString).digest('hex');
+          console.log('Using Node.js crypto module for SHA-1 generation');
+        } catch (e) {
+          console.error('Failed to load crypto module for SHA-1 generation:', e);
+          throw e; // Re-throw to be caught by outer try/catch
+        }
       }
+    } catch (e) {
+      console.warn('Falling back to Kademlia ID generator:', e.message);
+      localPeerId = 'fallback-' + kademliaGenerateNodeId(); // Use Kademlia's generator as a fallback if SHA-1 fails
     }
   }
   const eventHandlers = {}; // Object to store event handlers
@@ -186,16 +222,8 @@ export async function createMesh(options = {}) {
     }
   });
   
-  // Additionally subscribe to each specific topic used with sendBroadcast
-  // This ensures backward compatibility with existing code
-  gossipProtocol.subscribe('node_chat', ({ topic, payload, originPeerId }) => {
-    if (eventHandlers['message']) {
-      eventHandlers['message']({
-        from: originPeerId,
-        data: { type: 'broadcast', topic, payload }
-      });
-    }
-  });
+  // Removed hardcoded subscriptions to specific topics
+  // Clients should subscribe to topics they're interested in
 
   transport.on('signal', ({ from, signal }) => {
     let peer = peers.get(from);
@@ -555,6 +583,18 @@ export async function createMesh(options = {}) {
       gossipProtocol.subscribe(topic, handler);
     },
     gossipUnsubscribe: (topic, handler) => {
+      if (!gossipProtocol) throw new Error('Gossip protocol not initialized.');
+      gossipProtocol.unsubscribe(topic, handler);
+    },
+    // Direct subscribe method for backward compatibility
+    // This delegates to the gossip protocol's subscribe method
+    subscribe: (topic, handler) => {
+      if (!gossipProtocol) throw new Error('Gossip protocol not initialized.');
+      console.log(`P2PMesh: Client subscribing to topic '${topic}'`);
+      gossipProtocol.subscribe(topic, handler);
+    },
+    // Direct unsubscribe method for backward compatibility
+    unsubscribe: (topic, handler) => {
       if (!gossipProtocol) throw new Error('Gossip protocol not initialized.');
       gossipProtocol.unsubscribe(topic, handler);
     }
