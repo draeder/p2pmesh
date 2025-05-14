@@ -1,0 +1,36 @@
+{
+  "name": "p2pmesh",
+  "version": "0.1.0",
+  "description": "A batteries-included transport-agnostic peer-to-peer WebRTC mesh network library for both browsers and Node.js.",
+  "type": "module",
+  "main": "src/index.js",
+  "module": "src/index.js",
+  "browser": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start:server": "node examples/signaling-server.js",
+    "dev:chat": "npx http-server . -p 8081 -c-1 -o examples/chat-browser/index.html"
+  },
+  "repository": {
+    "type": "git",
+    "url": ""
+  },
+  "keywords": [
+    "p2p",
+    "webrtc",
+    "mesh",
+    "network",
+    "simple-peer",
+    "decentralized"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "simple-peer": "^9.11.1",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {}
+}

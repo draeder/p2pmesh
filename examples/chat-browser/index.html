@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>P2PMesh Chat Example</title>
+    <style>
+        body { font-family: sans-serif; margin: 20px; background-color: #f4f4f4; color: #333; }
+        #chatContainer { max-width: 600px; margin: auto; background-color: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
+        #messages { list-style-type: none; padding: 0; margin: 0 0 20px 0; height: 300px; overflow-y: scroll; border: 1px solid #ddd; border-radius: 4px; padding: 10px; background-color: #f9f9f9; }
+        #messages li { padding: 8px 12px; margin-bottom: 8px; border-radius: 4px; word-wrap: break-word; }
+        #messages li.local { background-color: #dcf8c6; text-align: right; margin-left: auto; max-width: 70%; }
+        #messages li.remote { background-color: #e9e9eb; text-align: left; margin-right: auto; max-width: 70%; }
+        #messageForm { display: flex; margin-bottom: 10px; }
+        #messageInput { flex-grow: 1; padding: 10px; border: 1px solid #ddd; border-radius: 4px 0 0 4px; }
+        #messageForm button { padding: 10px 15px; background-color: #007bff; color: white; border: none; cursor: pointer; border-radius: 0 4px 4px 0; }
+        #messageForm button:hover { background-color: #0056b3; }
+        #status { margin-bottom: 10px; font-style: italic; color: #666; }
+        #peerIdDisplay { margin-bottom: 10px; font-weight: bold; }
+        .peer-info { font-size: 0.9em; color: #555; }
+    </style>
+</head>
+<body>
+    <div id="chatContainer">
+        <h2>P2PMesh Chat</h2>
+        <div id="peerIdDisplay">Your Peer ID: <span id="myPeerId">Connecting...</span></div>
+        <div id="status">Status: Initializing...</div>
+        <ul id="messages"></ul>
+        <form id="messageForm">
+            <input type="text" id="messageInput" placeholder="Type a message..." autocomplete="off" />
+            <button type="submit">Send</button>
+        </form>
+        <div>
+            <h3>Connected Peers:</h3>
+            <ul id="connectedPeers"></ul>
+        </div>
+    </div>
+
+    <script type="module" src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,48 @@
+You are to generate a fully-featured, ESM-only JavaScript library called WebMeshDHT that works as both an npm package and a CDN script, with zero bundler requirements—running unmodified in Node.js and in browsers.
+
+Core Requirements:
+1. Output as pure ESM modules, with separate files under src/ and a root package.json configured for "module".
+2. Provide both an npm publish setup and a UMD/ESM-compatible CDN build via unpkg or jsdelivr.
+3. No bundler—use dynamic import or conditional exports so that import { … } from 'web-mesh-dht' Just Works in Node.js and in <script type="module"> in the browser.
+4. A clean modular folder structure:
+   - src/index.js — top-level API
+   - src/transports/ — transport abstractions (e.g. WebSocket, WebRTC via simple-peer)
+   - src/dht/ — kademlia routing tables and RPC
+   - src/gossip/ — gossip/broadcast layer on top of kademlia
+   - src/utils/ — SHA-1 ID generator (with optional override), helpers
+5. Integrate simple-peer for WebRTC:
+   - Properly handle initiator vs. responder roles.
+   - Expose a config for ICE servers (STUN/TURN) to handle NAT traversal.
+6. Expose a single createMesh(options) factory:
+   const mesh = createMesh({
+     maxPeers: 5,
+     peerId?: string,      # optional externally-provided SHA-1 ID
+     bootstrapUrls: [],    # WebSocket or HTTP endpoints for initial peer discovery
+     iceServers: [],       # default to public STUN servers
+   });
+7. Partial-mesh logic: automatically maintain up to maxPeers active connections per node, choosing peers via kademlia proximity.
+8. Kademlia-style routing:
+   - Standard XOR-distance routing table.
+   - findNode(), store(), findValue() RPC on top of simple-peer datachannels.
+9. Gossip protocol:
+   - Broadcast to peer subset based on DHT buckets.
+   - Direct (unicast) messaging via peerId lookup.
+   - Message signing or TTL to prevent loops.
+10. SHA-1–based peer IDs by default, but allow injection of a precomputed ID.
+11. Public API methods/events:
+    interface Mesh {
+      join(): Promise<void>
+      leave(): Promise<void>
+      sendBroadcast(topic: string, payload: any): void
+      send(toPeerId: string, payload: any): void
+      on(event: 'peer:connect'|'peer:disconnect'|'message', handler): void
+      getRoutingTable(): KademliaTable
+    }
+12. Include basic error-handling, retries/backoff for failed connections, and debug logging flags.
+
+Deliverables:
+- A fleshed-out folder structure stub with sample code comments.
+- A fully populated package.json with "exports", "module", "browser" fields.
+- A minimal example in examples/ showing Node.js and browser usage.
+
+Please generate all files in one go, making sure nothing is truncated.
