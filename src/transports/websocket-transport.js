@@ -21,13 +21,19 @@ export class WebSocketTransport extends AbstractTransport {
     this.pendingKademliaRpcs = new Map(); // For tracking Kademlia RPC replies
   }
 
-  async connect(localPeerId) {
+  async connect(localPeerId, options = {}) {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       console.log('WebSocket already connected.');
       return;
     }
     this.localPeerId = localPeerId;
-    console.log(`WebSocketTransport: Connecting to ${this.signalingServerUrl} as ${localPeerId}`);
+    this.isConnected = false;
+    
+    // If silentConnect option is provided, don't output connection messages
+    const silentConnect = options.silentConnect || false;
+    if (!silentConnect) {
+      console.log(`WebSocketTransport: Connecting to ${this.signalingServerUrl} as ${localPeerId}`);
+    }
 
     return new Promise((resolve, reject) => {
       this.ws = new WebSocket(this.signalingServerUrl);
@@ -36,6 +42,7 @@ export class WebSocketTransport extends AbstractTransport {
         console.log(`WebSocketTransport: Connected to ${this.signalingServerUrl}`);
         // Announce presence to the server
         this.ws.send(JSON.stringify({ type: 'join', peerId: this.localPeerId }));
+        this.isConnected = true;
         this.emit('open'); // Emit an open event specific to this transport if needed
         resolve();
       };
@@ -138,6 +145,7 @@ export class WebSocketTransport extends AbstractTransport {
       this.ws.onclose = (event) => {
         console.log(`WebSocketTransport: Disconnected from ${this.signalingServerUrl}. Code: ${event.code}, Reason: ${event.reason}`);
         this.ws = null;
+        this.isConnected = false;
         this.emit('close'); // Emit a close event specific to this transport
       };
     });

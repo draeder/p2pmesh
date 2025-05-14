@@ -76,6 +76,13 @@ async function main() {
     mesh.on('peer:disconnect', (peerId) => {
       console.log(`MESH EVENT: Disconnected from peer: ${peerId}`);
     });
+    
+    // Handler for the new peer eviction event
+    mesh.on('peer:evicted', (data) => {
+      console.log(`MESH EVENT: Evicted from mesh with reason: ${data.reason}`);
+      console.log(`MESH EVENT: Received ${data.alternativePeers.length} alternative peers for reconnection`);
+      console.log(`MESH EVENT: Will attempt peer-assisted reconnection on next join`);
+    });
 
     mesh.on('message', ({ from, data }) => {
       let parsedData = data;

@@ -248,7 +248,32 @@ export async function createMesh(options = {}) {
             console.log(`New peer ${from} (dist: ${distanceToNewPeer}) is closer than furthest peer ${furthestPeerContact.id} (dist: ${distanceToFurthestPeer}). Evicting furthest.`);
             const furthestPeerConnection = peers.get(furthestPeerContact.id);
             if (furthestPeerConnection) {
-              furthestPeerConnection.destroy(); // This should trigger 'close' event and removal
+              // Before destroying, send reconnection data to the evicted peer
+              // Collect information about other peers for reconnection assistance
+              const reconnectPeers = [];
+              peers.forEach((peerConn, peerId) => {
+                // Don't include the peer we're about to evict
+                if (peerId !== furthestPeerContact.id) {
+                  reconnectPeers.push(peerId);
+                }
+              });
+              
+              // Send reconnection data to the evicted peer
+              try {
+                furthestPeerConnection.send(JSON.stringify({
+                  type: 'reconnection_data',
+                  peers: reconnectPeers,
+                  reason: 'evicted_for_closer_peer'
+                }));
+                console.log(`Sent reconnection data to evicted peer ${furthestPeerContact.id} with ${reconnectPeers.length} alternative peers`);
+              } catch (error) {
+                console.error(`Failed to send reconnection data to evicted peer ${furthestPeerContact.id}:`, error);
+              }
+              
+              // Short delay to allow the message to be sent before destroying the connection
+              setTimeout(() => {
+                furthestPeerConnection.destroy(); // This should trigger 'close' event and removal
+              }, 100);
             }
             // Connect the new peer
             const newPeerInstance = new Peer({ initiator: false, trickle: false, iceServers });
@@ -281,7 +306,32 @@ export async function createMesh(options = {}) {
             console.log(`New peer ${from} (dist: ${distanceToNewPeer}) is closer than furthest peer ${furthestPeerContact.id} (dist: ${distanceToFurthestPeer}). Evicting furthest for connect_request.`);
             const furthestPeerConnection = peers.get(furthestPeerContact.id);
             if (furthestPeerConnection) {
-              furthestPeerConnection.destroy(); // This should trigger 'close' event and removal
+              // Before destroying, send reconnection data to the evicted peer
+              // Collect information about other peers for reconnection assistance
+              const reconnectPeers = [];
+              peers.forEach((peerConn, peerId) => {
+                // Don't include the peer we're about to evict
+                if (peerId !== furthestPeerContact.id) {
+                  reconnectPeers.push(peerId);
+                }
+              });
+              
+              // Send reconnection data to the evicted peer
+              try {
+                furthestPeerConnection.send(JSON.stringify({
+                  type: 'reconnection_data',
+                  peers: reconnectPeers,
+                  reason: 'evicted_for_connect_request'
+                }));
+                console.log(`Sent reconnection data to evicted peer ${furthestPeerContact.id} with ${reconnectPeers.length} alternative peers`);
+              } catch (error) {
+                console.error(`Failed to send reconnection data to evicted peer ${furthestPeerContact.id}:`, error);
+              }
+              
+              // Short delay to allow the message to be sent before destroying the connection
+              setTimeout(() => {
+                furthestPeerConnection.destroy(); // This should trigger 'close' event and removal
+              }, 100);
             }
             // Connect the new peer
             const newPeerInstance = new Peer({ initiator: true, trickle: false, iceServers });
@@ -307,9 +357,22 @@ export async function createMesh(options = {}) {
     peerConnectionAttempts.set(remotePeerId, Date.now());
     
     peer.on('signal', (data) => {
-      console.log(`Sending WebRTC signal to ${remotePeerId}`);
-      // This 'send' is for WebRTC signaling, not Kademlia RPCs
+      console.log(`Preparing WebRTC signal to ${remotePeerId}`);
+      
+      // Attempt peer relay for all connections for resilience
+      // Even if we have only 1 peer, it might be connected to our target
+      if (peers.size > 0) {
+        // Attempt to relay through existing peers
+        // This function always returns false now, ensuring we use signaling server
+        // but we still attempt relays to increase connection success probability
+        relaySignalingData(remotePeerId, data);
+      }
+      
+      // ALWAYS use the signaling server for reliable connections
+      // Using multiple signal paths improves connection success rates
+      console.log(`Sending WebRTC signal to ${remotePeerId} via signaling server`);
       transport.send(remotePeerId, { type: 'signal', from: localPeerId, signal: data });
+
     });
 
     peer.on('connect', () => {
@@ -346,9 +409,119 @@ export async function createMesh(options = {}) {
         return; // Stop processing if not valid JSON for structured messages
       }
 
+      // Handle relay_signal messages - relay WebRTC signaling data through peers
+      if (parsedData && parsedData.type === 'relay_signal') {
+        if (parsedData.to && parsedData.from && parsedData.signal) {
+          // Add received timestamp for tracking relay timing
+          const receivedTime = Date.now();
+          const relayLatency = parsedData.timestamp ? (receivedTime - parsedData.timestamp) : 'unknown';
+          
+          if (parsedData.to === localPeerId) {
+            // Signal is for us - process it directly and acknowledge receipt
+            console.log(`Received relayed signal from ${parsedData.from} via peer ${remotePeerId} (latency: ${relayLatency}ms)`);
+            
+            // Process the signal data
+            mesh.emit('signal', { from: parsedData.from, signal: parsedData.signal });
+            
+            // Send acknowledgment back to the sender
+            try {
+              peer.send(JSON.stringify({
+                type: 'relay_ack',
+                to: parsedData.from,
+                from: localPeerId,
+                originalTimestamp: parsedData.timestamp,
+                receivedTimestamp: receivedTime
+              }));
+            } catch (error) {
+              console.error(`Failed to send relay acknowledgment to ${remotePeerId}:`, error);
+            }
+          } else {
+            // Signal is for another peer - relay it further if we can
+            console.log(`Relaying signal from ${parsedData.from} to ${parsedData.to}`);
+            const targetPeer = peers.get(parsedData.to);
+            if (targetPeer && targetPeer.connected) {
+              try {
+                // Preserve original timestamp for accurate latency measurement
+                targetPeer.send(JSON.stringify({
+                  ...parsedData,
+                  relayPath: [...(parsedData.relayPath || []), localPeerId] // Track relay path
+                }));
+                console.log(`Successfully relayed signal to ${parsedData.to}`);
+              } catch (error) {
+                console.error(`Error relaying signal to ${parsedData.to}:`, error);
+                // Notify original sender of relay failure if possible
+                try {
+                  peer.send(JSON.stringify({
+                    type: 'relay_failure',
+                    to: parsedData.from,
+                    from: localPeerId,
+                    targetPeer: parsedData.to,
+                    reason: error.message || 'Send error'
+                  }));
+                } catch (e) {
+                  console.error(`Failed to send relay failure notification:`, e);
+                }
+              }
+            } else {
+              console.warn(`Cannot relay signal to ${parsedData.to}: not connected`);
+              // Notify original sender that we couldn't complete the relay
+              try {
+                peer.send(JSON.stringify({
+                  type: 'relay_failure',
+                  to: parsedData.from,
+                  from: localPeerId,
+                  targetPeer: parsedData.to,
+                  reason: 'Peer not connected'
+                }));
+              } catch (error) {
+                console.error(`Failed to send relay failure notification:`, error);
+              }
+            }
+          }
+          return; // Don't pass relay_signal messages to application layer
+        }
+      }
+      
+      // Handle relay acknowledgments
+      if (parsedData && parsedData.type === 'relay_ack') {
+        const latency = parsedData.receivedTimestamp - parsedData.originalTimestamp;
+        console.log(`Relay to ${parsedData.from} was acknowledged (latency: ${latency}ms)`);
+        return; // Don't pass ack messages to application layer
+      }
+      
+      // Handle relay failures
+      if (parsedData && parsedData.type === 'relay_failure') {
+        console.warn(`Relay to ${parsedData.targetPeer} failed: ${parsedData.reason}`);
+        return; // Don't pass failure messages to application layer
+      }
+
       // console.log(`P2PMesh: Received parsed data from ${remotePeerId}:`, parsedData);
 
-      if (parsedData && parsedData.type === 'gossip') {
+      if (parsedData && parsedData.type === 'reconnection_data') {
+        // Store reconnection data for later use if disconnected
+        console.log(`Received reconnection data from ${remotePeerId} with ${parsedData.peers.length} alternative peers`);
+        mesh._reconnectionPeers = parsedData.peers;
+        // Create a timestamp to track when we received this data
+        mesh._reconnectionDataTimestamp = Date.now();
+        
+        // Emit a special event that applications can listen for
+        if (eventHandlers['peer:evicted']) {
+          eventHandlers['peer:evicted']({ 
+            reason: parsedData.reason, 
+            alternativePeers: parsedData.peers 
+          });
+        }
+        
+        // Store these peers for potential direct connection attempts on next join
+        if (mesh._alternativePeers) {
+          // Merge with existing alternative peers, avoiding duplicates
+          mesh._alternativePeers = [...new Set([...mesh._alternativePeers, ...parsedData.peers])];
+        } else {
+          mesh._alternativePeers = [...parsedData.peers];
+        }
+        
+        // Don't forward this internal protocol message to application
+      } else if (parsedData && parsedData.type === 'gossip') {
         // console.log(`P2PMesh: Received gossip message from ${remotePeerId}`);
         gossipProtocol.handleIncomingMessage(parsedData, remotePeerId);
       } else if (parsedData && parsedData.type === 'gossip_ack') {
@@ -465,29 +638,241 @@ export async function createMesh(options = {}) {
     }
   }
 
+  // Relay messages to a peer via another peer (used when direct connection isn't available)
+  function relayMessage(viaNodeId, toNodeId, message) {
+    const peer = peers.get(viaNodeId);
+    if (!peer || !peer.connected) {
+      console.warn(`Cannot relay message: Relay peer ${viaNodeId} not connected.`);
+      return false;
+    }
+    try {
+      peer.send(JSON.stringify({
+        type: 'relay',
+        to: toNodeId,
+        message
+      }));
+      return true;
+    } catch (error) {
+      console.error(`Error relaying message via ${viaNodeId}:`, error);
+      return false;
+    }
+  }
+  
+  // Relay signaling data through peers instead of the signaling server
+  function relaySignalingData(toPeerId, signalData) {
+    if (peers.size === 0) {
+      console.warn('No connected peers to relay signaling data through');
+      return false;
+    }
+    
+    // Check if the target peer is directly connected to us
+    // If it is, we don't need to relay and should return false to use signaling server
+    if (peers.has(toPeerId) && peers.get(toPeerId).connected) {
+      console.log(`Target peer ${toPeerId} is already directly connected. No relay needed.`);
+      return false;
+    }
+    
+    // Track if we've attempted to relay, not that it was successful
+    let relayAttempted = false;
+    
+    // Try to relay through connected peers
+    let potentialRelayPeers = [];
+    peers.forEach((peer, peerId) => {
+      if (peer.connected) {
+        potentialRelayPeers.push(peerId);
+      }
+    });
+    
+    // Select up to 3 peers for relay to avoid overwhelming the network
+    // but increase chances of successful relay
+    if (potentialRelayPeers.length > 3) {
+      potentialRelayPeers = potentialRelayPeers.slice(0, 3);
+    }
+    
+    // Attempt relay through selected peers
+    for (const peerId of potentialRelayPeers) {
+      const peer = peers.get(peerId);
+      if (peer && peer.connected) {
+        try {
+          console.log(`Attempting to relay signaling data to ${toPeerId} via peer ${peerId}`);
+          peer.send(JSON.stringify({
+            type: 'relay_signal',
+            from: localPeerId,
+            to: toPeerId,
+            signal: signalData,
+            timestamp: Date.now() // Add timestamp for tracking purposes
+          }));
+          relayAttempted = true;
+        } catch (error) {
+          console.error(`Failed to relay signal via peer ${peerId}:`, error);
+        }
+      }
+    }
+    
+    // Just because we sent the relay doesn't mean it will succeed
+    // Return false to ensure fallback to signaling server as a reliability measure
+    console.log(`Relay attempts made: ${relayAttempted}. Recommending signaling server fallback for reliability.`);
+    return false; // Always use signaling server to ensure connection reliability
+  }
+
   const mesh = {
     peerId: localPeerId,
     kademlia,
+    // Store reconnection data for peer-assisted reconnection
+    _reconnectionPeers: [],
+    _reconnectionDataTimestamp: 0,
     get peers() { return peers; }, // Expose connected WebRTC peers
     join: async () => {
       console.log('Joining mesh...');
-      await transport.connect(localPeerId); // Connect transport (e.g., WebSocket to signaling server)
       
-      console.log('Bootstrapping Kademlia DHT with configured bootstrapNodes...');
-      // Bootstrap nodes should be {id: string, address: any}
-      // The 'address' is what transport.sendKademliaRpc would use.
-      // If bootstrapNodes are just IDs, transport needs to resolve them or use ID as address.
-      const initialBootstrapNodes = bootstrapNodes.map(node => 
-        typeof node === 'string' ? {id: node, address: node} : node
-      );
-      if(initialBootstrapNodes.length > 0) {
-        await kademlia.bootstrap(initialBootstrapNodes);
+      // Check if we have recent reconnection data from previous sessions (within 10 minutes)
+      const hasRecentReconnectionData = mesh._reconnectionPeers && 
+                                     mesh._reconnectionPeers.length > 0 && 
+                                     (Date.now() - mesh._reconnectionDataTimestamp < 10 * 60 * 1000);
+      
+      // Check for alternative peers collected from peer evictions
+      const hasAlternativePeers = mesh._alternativePeers && mesh._alternativePeers.length > 0;
+      
+      let reconnectedViaPeers = false;
+      
+      // Try peer-assisted reconnection first if we have recent data
+      // or if we know of existing peers in the network
+      const knownPeersFromRouting = kademlia.routingTable.getAllContacts ? kademlia.routingTable.getAllContacts() : [];
+      const hasKnownPeers = knownPeersFromRouting.length > 0;
+      
+      // Create a combined list of potential peers for connection attempts
+      // Prioritize recently known peers for faster connection
+      let potentialPeers = [];
+      
+      if (hasRecentReconnectionData) {
+        potentialPeers = [...mesh._reconnectionPeers];
       }
       
-      // Discover the network & populate routing table further. 
-      // findAndConnectPeers will use Kademlia's findNode.
-      // The signaling server might also send 'bootstrap_peers' which will trigger the listener above.
-      await findAndConnectPeers();
+      if (hasAlternativePeers) {
+        // Add alternative peers, avoiding duplicates
+        mesh._alternativePeers.forEach(peerId => {
+          if (!potentialPeers.includes(peerId)) {
+            potentialPeers.push(peerId);
+          }
+        });
+      }
+      
+      if (hasKnownPeers) {
+        // Add known peers from routing table, avoiding duplicates
+        knownPeersFromRouting.forEach(contact => {
+          if (!potentialPeers.includes(contact.id)) {
+            potentialPeers.push(contact.id);
+          }
+        });
+      }
+      
+      if (potentialPeers.length > 0) {
+        console.log(`Attempting peer-based connection with ${potentialPeers.length} potential peers...`);
+        
+        // First connect transport minimally to facilitate peer connection if needed
+        if (!transport.isConnected) {
+          try {
+            await transport.connect(localPeerId, {silentConnect: true});
+          } catch (error) {
+            console.warn('Failed to connect transport silently:', error);
+            // Continue anyway - we might still be able to connect through peers
+          }
+        }
+        
+        // Try connecting to each potential peer
+        for (const alternatePeerId of potentialPeers) {
+          if (peers.size >= maxPeers) break; // Stop if we've reached max peers
+          
+          try {
+            console.log(`Trying peer-assisted connection to ${alternatePeerId}...`);
+            const peerConnection = new Peer({ initiator: true, trickle: false, iceServers });
+            setupPeerEvents(peerConnection, alternatePeerId);
+            peers.set(alternatePeerId, peerConnection);
+            
+            // First attempt direct relay through any existing connected peers
+            let relayAttempted = false;
+            if (peers.size >= 2) {
+              // Find existing peers to relay through
+              peers.forEach((peer, peerId) => {
+                if (peerId !== alternatePeerId && peer.connected) {
+                  try {
+                    // Send a connect request that will be relayed
+                    peer.send(JSON.stringify({
+                      type: 'relay_signal',
+                      from: localPeerId,
+                      to: alternatePeerId,
+                      signal: { type: 'connect_request' } // A minimal signal to initiate connection
+                    }));
+                    console.log(`Sent relay connection request to ${alternatePeerId} via ${peerId}`);
+                    relayAttempted = true;
+                  } catch (error) {
+                    console.error(`Failed to send relay request via peer ${peerId}:`, error);
+                  }
+                }
+              });
+            }
+            
+            // If no peers available for relay or relay not attempted, fall back to transport
+            if (!relayAttempted) {
+              // Request connection via transport - this uses signaling but is direct
+              transport.send(alternatePeerId, { type: 'connect_request', from: localPeerId });
+            }
+            
+            // If this successfully connects, peer:connect event will be triggered
+            // Wait a bit to see if connection establishes before trying next peer
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            
+            // Check if we connected successfully
+            if (peers.has(alternatePeerId) && peers.get(alternatePeerId).connected) {
+              console.log(`Successfully connected to peer ${alternatePeerId}!`);
+              reconnectedViaPeers = true;
+              
+              // If this is our first peer connection and we have max peers > 1,
+              // try to connect to one more peer for redundancy
+              if (peers.size === 1 && maxPeers > 1) {
+                console.log('Connected to one peer, continuing to try one more for redundancy');
+                continue;
+              }
+              
+              break; // Successfully connected to at least one peer (or two if needed)
+            }
+          } catch (error) {
+            console.error(`Failed to connect via peer ${alternatePeerId}:`, error);
+            // Continue to try the next peer
+          }
+        }
+      }
+      
+      // If peer-assisted reconnection failed or wasn't attempted, connect normally
+      if (!reconnectedViaPeers) {
+        console.log('Using signaling server for mesh join...');
+        await transport.connect(localPeerId); // Connect transport (e.g., WebSocket to signaling server)
+        
+        console.log('Bootstrapping Kademlia DHT with configured bootstrapNodes...');
+        // Bootstrap nodes should be {id: string, address: any}
+        // The 'address' is what transport.sendKademliaRpc would use.
+        // If bootstrapNodes are just IDs, transport needs to resolve them or use ID as address.
+        const initialBootstrapNodes = bootstrapNodes.map(node => 
+          typeof node === 'string' ? {id: node, address: node} : node
+        );
+        if(initialBootstrapNodes.length > 0) {
+          await kademlia.bootstrap(initialBootstrapNodes);
+        }
+        
+        // Discover the network & populate routing table further.
+        await findAndConnectPeers();
+      } else {
+        // If we reconnected via peers, we should still bootstrap Kademlia with our connected peers
+        const connectedPeers = [];
+        peers.forEach((_, peerId) => {
+          connectedPeers.push({ id: peerId, address: peerId });
+        });
+        
+        if (connectedPeers.length > 0) {
+          console.log(`Bootstrapping Kademlia with ${connectedPeers.length} connected peers...`);
+          await kademlia.bootstrap(connectedPeers);
+        }
+      }
 
       // Start periodic timeout check for stalled peer connections
       const connectionTimeoutInterval = setInterval(checkForConnectionTimeouts, 5000); // Check every 5 seconds
@@ -554,6 +939,83 @@ export async function createMesh(options = {}) {
         eventHandlers[event] = handler;
       } else {
         console.error(`Handler for event '${event}' is not a function.`);
+      }
+    },
+    emit: (event, data) => {
+      // Internal method to emit events to registered handlers
+      if (eventHandlers[event] && typeof eventHandlers[event] === 'function') {
+        eventHandlers[event](data);
+      }
+      
+      // Special handling for signal events - needed for relay_signal processing
+      if (event === 'signal' && data && data.from && data.signal) {
+        // Process the relayed signal like it came from the transport
+        const { from, signal } = data;
+        const peer = peers.get(from);
+        if (peer) {
+          console.log(`Processing relayed signal from ${from}`);
+          peer.signal(signal);
+        } else {
+          // This is a new peer trying to connect via relay
+          console.log(`Received relayed signal from new peer ${from}, attempting to connect.`);
+          if (peers.size < maxPeers) {
+            const newPeerInstance = new Peer({ initiator: false, trickle: false, iceServers });
+            setupPeerEvents(newPeerInstance, from);
+            newPeerInstance.signal(signal);
+            peers.set(from, newPeerInstance);
+          } else {
+            // Handle max peers case with priority logic
+            console.log(`Max peers (${maxPeers}) reached, applying eviction strategy for relayed signal.`);
+            // Use the same eviction strategy as with regular signals
+            const furthestPeerContact = kademlia.routingTable.getFurthestContact();
+            if (furthestPeerContact) {
+              const distanceToNewPeer = calculateDistance(localPeerId, from);
+              const distanceToFurthestPeer = calculateDistance(localPeerId, furthestPeerContact.id);
+
+              if (distanceToNewPeer < distanceToFurthestPeer) {
+                console.log(`New peer ${from} (dist: ${distanceToNewPeer}) is closer than furthest peer ${furthestPeerContact.id} (dist: ${distanceToFurthestPeer}). Evicting furthest for relayed signal.`);
+                const furthestPeerConnection = peers.get(furthestPeerContact.id);
+                if (furthestPeerConnection) {
+                  // Before destroying, send reconnection data to the evicted peer
+                  // Collect information about other peers for reconnection assistance
+                  const reconnectPeers = [];
+                  peers.forEach((peerConn, peerId) => {
+                    // Don't include the peer we're about to evict
+                    if (peerId !== furthestPeerContact.id) {
+                      reconnectPeers.push(peerId);
+                    }
+                  });
+                  
+                  // Send reconnection data to the evicted peer
+                  try {
+                    furthestPeerConnection.send(JSON.stringify({
+                      type: 'reconnection_data',
+                      peers: reconnectPeers,
+                      reason: 'evicted_for_relayed_signal'
+                    }));
+                    console.log(`Sent reconnection data to evicted peer ${furthestPeerContact.id} with ${reconnectPeers.length} alternative peers`);
+                  } catch (error) {
+                    console.error(`Failed to send reconnection data to evicted peer ${furthestPeerContact.id}:`, error);
+                  }
+                  
+                  // Short delay to allow the message to be sent before destroying the connection
+                  setTimeout(() => {
+                    furthestPeerConnection.destroy(); // This should trigger 'close' event and removal
+                  }, 100);
+                }
+                // Connect the new peer
+                const newPeerInstance = new Peer({ initiator: false, trickle: false, iceServers });
+                setupPeerEvents(newPeerInstance, from);
+                newPeerInstance.signal(signal);
+                peers.set(from, newPeerInstance);
+              } else {
+                console.log(`Max peers (${maxPeers}) reached. New peer ${from} (dist: ${distanceToNewPeer}) is not closer than furthest ${furthestPeerContact.id} (dist: ${distanceToFurthestPeer}). Ignoring relayed signal.`);
+              }
+            } else {
+              console.log(`Max peers (${maxPeers}) reached, but no furthest peer found to compare. Ignoring relayed signal from ${from}.`);
+            }
+          }
+        }
       }
     },
     getRoutingTable: () => {
