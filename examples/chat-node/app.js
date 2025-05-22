@@ -1,17 +1,22 @@
 // examples/chat-node/app.js
 import { createMesh } from '../../src/index.js';
 import { WebSocketTransport } from '../../src/transports/websocket-transport.js';
-// Removed WebSocket import - WebSocketTransport handles platform detection
-// Removed crypto import as we'll let the library handle ID generation
+import readline from 'readline';
 
 const signalingServerUrl = 'ws://localhost:8080';
-// Remove manual peer ID generation - let the library handle it
 let mesh;
 
 // Set to track disconnected peers to prevent duplicate disconnect messages
 const disconnectedPeers = new Set();
 
 console.log(`Node.js P2PMesh Example - Starting...`);
+
+// Create readline interface
+const rl = readline.createInterface({
+  input: process.stdin,
+  output: process.stdout,
+  prompt: 'p2pmesh> '
+});
 
 async function main() {
   try {
@@ -109,6 +114,7 @@ async function main() {
         parsedData = JSON.stringify(parsedData, null, 2);
       }
       console.log(`MESH EVENT: Message from ${from}: ${parsedData}`);
+      rl.prompt(); // Re-prompt after receiving a message
     });
     
     // Enhancing peer event logging for Node.js (similar to browser example but simpler)
@@ -121,6 +127,7 @@ async function main() {
           peerInstance.on('connect', () => {
             console.log(`Peer: Connected to peer: ${targetPeerId}`);
             mesh.emit('peer:connect', targetPeerId); // Ensure mesh event fires
+            rl.prompt(); // Re-prompt after connection event
           });
           peerInstance.on('data', (d) => {
             const dataString = d.toString();
@@ -174,6 +181,7 @@ async function main() {
               disconnectedPeers.add(targetPeerId);
               mesh.emit('peer:disconnect', targetPeerId);
             }
+            rl.prompt(); // Re-prompt after disconnection event
           });
           peerInstance.on('error', (err) => {
             console.error(`Peer: Error with ${targetPeerId}: ${err.message || err}`);
@@ -182,6 +190,7 @@ async function main() {
               disconnectedPeers.add(targetPeerId);
               mesh.emit('peer:disconnect', targetPeerId); // Treat error as disconnect for simplicity
             }
+            rl.prompt(); // Re-prompt after error event
           });
           peerInstance._nodeListenersAttached = true;
         }
@@ -196,14 +205,94 @@ async function main() {
       // Properly handle message object to display actual content instead of [object Object]
       const messageContent = typeof message === 'object' ? JSON.stringify(message) : message;
       console.log(`MESH EVENT: Received broadcast chat message: ${messageContent}`);
+      rl.prompt(); // Re-prompt after broadcast message
     });
     
-    // Removed periodic broadcasting as it's redundant with the gossip protocol
-    // The gossip protocol already handles message propagation through the network
-    // If you want to test broadcasting, you can manually trigger it or implement a command-based approach instead
+    // Start the readline interface
+    console.log('\nAvailable commands:');
+    console.log('  peers - List connected peers');
+    console.log('  send <peerId> <message> - Send direct message to peer');
+    console.log('  send <message> - Send broadcast message to all peers');
+    console.log('  help - Show this help message');
+    console.log('  exit - Exit the application\n');
+    
+    rl.prompt();
+    
+    rl.on('line', (line) => {
+      const trimmedLine = line.trim();
+      const args = trimmedLine.split(' ');
+      const command = args[0].toLowerCase();
+      
+      switch (command) {
+        case 'peers':
+          // List connected peers
+          console.log('\nConnected peers:');
+          if (mesh.peers.size === 0) {
+            console.log('  No peers connected.');
+          } else {
+            mesh.peers.forEach((peer, peerId) => {
+              console.log(`  ${peerId} (${peer.connected ? 'Connected' : 'Connecting...'})`); 
+            });
+          }
+          break;
+          
+        case 'send':
+          if (args.length < 2) {
+            console.log('Error: Missing message. Usage: send <peerId> <message> or send <message>');
+          } else if (args.length === 2) {
+            // Broadcast message to all peers
+            const message = args[1];
+            console.log(`Broadcasting message to all peers: ${message}`);
+            mesh.sendBroadcast('chat_message', {
+              type: 'broadcast',
+              payload: message,
+              from: mesh.peerId,
+              timestamp: Date.now()
+            });
+          } else {
+            // Direct message to specific peer
+            const targetPeerId = args[1];
+            const message = args.slice(2).join(' ');
+            
+            if (mesh.peers.has(targetPeerId)) {
+              console.log(`Sending direct message to ${targetPeerId}: ${message}`);
+              mesh.send(targetPeerId, JSON.stringify({
+                type: 'direct',
+                payload: message,
+                from: mesh.peerId,
+                timestamp: Date.now()
+              }));
+            } else {
+              console.log(`Error: Peer ${targetPeerId} not connected.`);
+            }
+          }
+          break;
+          
+        case 'help':
+          console.log('\nAvailable commands:');
+          console.log('  peers - List connected peers');
+          console.log('  send <peerId> <message> - Send direct message to peer');
+          console.log('  send <message> - Send broadcast message to all peers');
+          console.log('  help - Show this help message');
+          console.log('  exit - Exit the application');
+          break;
+          
+        case 'exit':
+          console.log('Exiting...');
+          rl.close();
+          process.emit('SIGINT');
+          return;
+          
+        default:
+          console.log(`Unknown command: ${command}. Type 'help' for available commands.`);
+      }
+      
+      rl.prompt();
+    });
 
   } catch (error) {
     console.error('Failed to initialize P2PMesh in Node.js:', error);
+    rl.close();
   }
 }
 
@@ -211,6 +300,7 @@ main();
 
 process.on('SIGINT', async () => {
   console.log('\nGracefully shutting down...');
+  rl.close();
   if (mesh) {
     await mesh.leave();
     console.log('Mesh left.');
