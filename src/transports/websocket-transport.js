@@ -1,6 +1,6 @@
 // src/transports/websocket-transport.js
 
-import { AbstractTransport } from './abstract-transport.js';
+import { AbstractTransport } from './transport-interface.js';
 
 /**
  * WebSocket Transport Layer

@@ -99,21 +99,32 @@ async function main() {
     });
 
     mesh.on('message', ({ from, data }) => {
-      let parsedData = data;
+      let displayData = data;
       try {
-        const messagePayload = JSON.parse(data);
-        if (messagePayload.type === 'direct' || messagePayload.type === 'broadcast') {
-          parsedData = messagePayload.payload;
+        let messageObject = data;
+        if (typeof data === 'string') {
+          try {
+            messageObject = JSON.parse(data);
+          } catch {
+            messageObject = data;
+          }
+        }
+
+        if (messageObject && typeof messageObject.payload !== 'undefined') {
+          displayData = messageObject.payload;
+        } else {
+          displayData = messageObject;
+        }
+
+        if (typeof displayData === 'object' && displayData !== null) {
+          displayData = JSON.stringify(displayData, null, 2);
         }
       } catch (e) {
-        // If not JSON, use as is
+        console.error('Error processing message:', e);
+        displayData = String(data);
       }
       
-      // If parsedData is an object, convert it to a readable string
-      if (typeof parsedData === 'object' && parsedData !== null) {
-        parsedData = JSON.stringify(parsedData, null, 2);
-      }
-      console.log(`MESH EVENT: Message from ${from}: ${parsedData}`);
+      console.log(`${from}: ${displayData}`);
       rl.prompt(); // Re-prompt after receiving a message
     });
     
@@ -164,6 +175,7 @@ async function main() {
               if ((parsedData.type === 'broadcast' && parsedData.topic === 'chat_message') ||
                   parsedData.type === 'direct') {
                 // Only pass through chat-related messages
+                // We'll handle the formatting in the message event handler
               }
             } catch (e) {
               // If not JSON, continue with raw data but only log in debug mode
@@ -202,9 +214,28 @@ async function main() {
     
     // Subscribe to the same 'chat_message' topic as browser clients to ensure consistency
     mesh.subscribe('chat_message', (message) => {
-      // Properly handle message object to display actual content instead of [object Object]
-      const messageContent = typeof message === 'object' ? JSON.stringify(message) : message;
-      console.log(`MESH EVENT: Received broadcast chat message: ${messageContent}`);
+      let displayData = message;
+      try {
+        if (typeof message === 'object' && message !== null) {
+          if (typeof message.payload !== 'undefined') {
+            displayData = message.payload;
+          }
+          
+          if (typeof displayData === 'object' && displayData !== null) {
+            displayData = JSON.stringify(displayData, null, 2);
+          }
+        }
+      } catch (e) {
+        console.error('Error processing broadcast message:', e);
+        displayData = String(message);
+      }
+      
+      // Display in the same format as direct messages
+      if (message.originPeerId) {
+        console.log(`${message.originPeerId}: ${displayData}`);
+      } else {
+        console.log(`Broadcast: ${displayData}`);
+      }
       rl.prompt(); // Re-prompt after broadcast message
     });
     
@@ -243,12 +274,9 @@ async function main() {
             // Broadcast message to all peers
             const message = args[1];
             console.log(`Broadcasting message to all peers: ${message}`);
-            mesh.sendBroadcast('chat_message', {
-              type: 'broadcast',
-              payload: message,
-              from: mesh.peerId,
-              timestamp: Date.now()
-            });
+            mesh.sendBroadcast('chat_message', message);
+            // Display the message locally in the same format as received messages
+            console.log(`${mesh.peerId}: ${message}`);
           } else {
             // Direct message to specific peer
             const targetPeerId = args[1];
@@ -256,12 +284,9 @@ async function main() {
             
             if (mesh.peers.has(targetPeerId)) {
               console.log(`Sending direct message to ${targetPeerId}: ${message}`);
-              mesh.send(targetPeerId, JSON.stringify({
-                type: 'direct',
-                payload: message,
-                from: mesh.peerId,
-                timestamp: Date.now()
-              }));
+              mesh.send(targetPeerId, message);
+              // Display the message locally in the same format as received messages
+              console.log(`${mesh.peerId} → ${targetPeerId}: ${message}`);
             } else {
               console.log(`Error: Peer ${targetPeerId} not connected.`);
             }

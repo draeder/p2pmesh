@@ -29,7 +29,7 @@ This project provides a foundational library for creating peer-to-peer mesh netw
 │   └── signaling-server.js # WebSocket signaling server
 ├── src/
 │   ├── transports/
-│   │   ├── abstract-transport.js # Base class for transports
+│   │   ├── transport-interface.js # Interface for transport implementations
 │   │   └── websocket-transport.js# WebSocket transport implementation
 │   ├── gossip.js           # Gossip protocol implementation
 │   ├── kademlia.js         # Kademlia DHT implementation

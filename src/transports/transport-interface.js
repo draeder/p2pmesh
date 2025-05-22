@@ -1,4 +1,4 @@
-// src/transports/abstract-transport.js
+// src/transports/transport-interface.js
 
 /**
  * Abstract Transport Layer
