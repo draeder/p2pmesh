@@ -19,22 +19,26 @@ This project provides a foundational library for creating peer-to-peer mesh netw
 ## Project Structure
 
 ```
-.p2pmesh/
+p2pmesh/
+├── docs/
+│   └── named-transports.md    # Documentation for named transport system
 ├── examples/
-│   ├── chat-browser/       # Browser-based chat application example
+│   ├── chat-browser/           # Browser-based chat application example
 │   │   ├── app.js
 │   │   └── index.html
-│   ├── chat-node/          # Node.js chat application example
+│   ├── chat-node/              # Node.js chat application example
 │   │   └── app.js
-│   └── signaling-server.js # WebSocket signaling server
+│   └── signaling-server.js     # WebSocket signaling server
 ├── src/
 │   ├── transports/
-│   │   ├── transport-interface.js # Interface for transport implementations
-│   │   └── websocket-transport.js# WebSocket transport implementation
-│   ├── gossip.js           # Gossip protocol implementation
-│   ├── kademlia.js         # Kademlia DHT implementation
-│   └── index.js            # Main P2PMesh API (createMesh function)
+│   │   ├── transport-interface.js    # Abstract transport interface
+│   │   ├── transport-registry.js     # Named transport registry system
+│   │   └── websocket-transport.js    # WebSocket transport implementation
+│   ├── gossip.js               # Gossip protocol implementation
+│   ├── kademlia.js             # Kademlia DHT implementation
+│   └── index.js                # Main P2PMesh API (createMesh function)
 ├── .gitignore
+├── LICENSE
 ├── package.json
 └── README.md
 ```

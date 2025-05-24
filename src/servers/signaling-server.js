@@ -1,8 +1,7 @@
-// examples/signaling-server.js
+// src/servers/signaling-server.js
 import { WebSocketServer } from 'ws';
-// Assuming kademlia.js is in ../src/ relative to this examples/signaling-server.js
-// Adjust the path if your project structure is different.
-import { calculateDistance, K as KADEMLIA_K } from '../src/kademlia.js';
+// Import Kademlia utilities from the parent directory
+import { calculateDistance, K as KADEMLIA_K } from '../kademlia.js';
 
 const wss = new WebSocketServer({ port: 8080 });
 

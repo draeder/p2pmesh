@@ -165,7 +165,7 @@ class RoutingTable {
 class KademliaDHT {
   constructor(localNodeId, transport, options = {}) {
     this.nodeId = generateNodeId(localNodeId); // Ensure we have a Kademlia-style ID
-    this.transport = transport; // For sending RPC messages
+    this.transport = transport; // This will be the transportInstance from index.js
     this.routingTable = new RoutingTable(this.nodeId);
     this.k = options.k || K;
     this.alpha = options.alpha || ALPHA;

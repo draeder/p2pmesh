@@ -1,6 +1,7 @@
 // examples/chat-browser/app.js
 import { createMesh } from '../../src/index.js';
-import { WebSocketTransport } from '../../src/transports/websocket-transport.js';
+// Named transport system is used instead of direct import
+// import { WebSocketTransport } from '../../src/transports/websocket-transport.js';
 
 document.addEventListener('DOMContentLoaded', () => {
   const myPeerIdEl = document.getElementById('myPeerId');
@@ -51,28 +52,24 @@ document.addEventListener('DOMContentLoaded', () => {
   async function initMesh() {
     try {
       statusEl.textContent = `Status: Connecting to signaling server ${signalingServerUrl}...`;
-      const transport = new WebSocketTransport(signalingServerUrl);
-
-      transport.on('open', () => {
-        statusEl.textContent = 'Status: Connected to signaling server. Joining mesh...';
-      });
-      transport.on('close', () => {
-        statusEl.textContent = 'Status: Disconnected from signaling server.';
-        addMessage('Disconnected from signaling server.', 'system');
-        updateConnectedPeersList();
-      });
-      transport.on('error', (err) => {
-        statusEl.textContent = 'Status: Signaling error.';
-        addMessage(`Signaling error: ${err.message}`, 'system');
-        console.error('Transport error:', err);
-        updateConnectedPeersList();
-      });
-
+      // Using named transport system
+      statusEl.textContent = `Status: Connecting to signaling server ${signalingServerUrl}...`;
+      
+      // Using named transport (recommended method)
+      // No need to import WebSocketTransport when using named transport
+      // The transport will be created internally based on the name
+      
       mesh = await createMesh({
-        transport,
+        transportName: 'websocket',
+        transportOptions: {
+          signalingServerUrl: signalingServerUrl
+        },
         maxPeers: 3,
         iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
       });
+      
+      // Note: Event handlers like 'open', 'close', and 'error' are handled internally
+      // by the named transport system. The mesh object will still emit appropriate events.
 
       myPeerIdEl.textContent = mesh.peerId;
 

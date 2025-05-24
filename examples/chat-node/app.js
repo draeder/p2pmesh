@@ -1,6 +1,7 @@
 // examples/chat-node/app.js
 import { createMesh } from '../../src/index.js';
-import { WebSocketTransport } from '../../src/transports/websocket-transport.js';
+// Named transport system is used instead of direct import
+// import { WebSocketTransport } from '../../src/transports/websocket-transport.js';
 import readline from 'readline';
 
 const signalingServerUrl = 'ws://localhost:8080';
@@ -21,27 +22,27 @@ const rl = readline.createInterface({
 async function main() {
   try {
     console.log(`Connecting to signaling server ${signalingServerUrl}...`);
-    const transport = new WebSocketTransport(signalingServerUrl);
-
-    transport.on('open', () => {
-      console.log('Transport: Connected to signaling server. Joining mesh...');
-    });
-
-    transport.on('close', () => {
-      console.log('Transport: Disconnected from signaling server.');
-    });
-
-    transport.on('error', (err) => {
-      console.error('Transport Error:', err.message || err);
-    });
-
+    
+    // Using named transport system
+    console.log(`Connecting to signaling server ${signalingServerUrl} using named transport...`);
+    
+    // Using named transport (recommended method)
+    // No need to import WebSocketTransport when using named transport
+    // The transport will be created internally based on the name
+    
     // Properly await the createMesh function to ensure it's fully initialized
     mesh = await createMesh({
       // Removed peerId parameter to let the library handle ID generation
-      transport: transport,
+      transportName: 'websocket',
+      transportOptions: {
+        signalingServerUrl: signalingServerUrl
+      },
       maxPeers: 3, // Example: limit to 3 peers for the Node.js client
       iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] // Public STUN server
     });
+    
+    // Note: Event handlers like 'open', 'close', and 'error' are handled internally
+    // by the named transport system. The mesh object will still emit appropriate events.
     
     // Override internal mesh protocol logging functions to suppress verbose output
     // This monkey-patches the mesh object to clean up console output for end users
