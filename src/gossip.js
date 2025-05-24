@@ -24,7 +24,7 @@ class GossipMessage {
   }
   
   /**
-   * Manages the gossip protocol.
+   * Manages the gossip protocol with island detection and smart routing.
    */
   export class GossipProtocol {
     /**
@@ -43,11 +43,158 @@ class GossipMessage {
       this.messageHandlers = new Map();
       this.maxHops = 10;
       this.cacheTTL = 5 * 60 * 1000;
-      this.pendingAcknowledgments = new Map();
-      this.messageRetryInterval = 2000;
-      this.maxRetryAttempts = 3; // Reduced from 6 to 3
-  
-      console.log(`GossipProtocol initialized for peer ${localPeerId}`);
+      
+      // Peer connectivity tracking
+      this.peerReachability = new Map(); // peerId -> { lastSeen, failures, reachable }
+      this.connectivityCheckInterval = 30000; // 30 seconds
+      this.maxFailures = 3; // Mark peer as unreachable after 3 failures
+      
+      // Island detection and bridging
+      this.knownPeers = new Set(); // All peers we've ever seen
+      this.bridgePeers = new Set(); // Peers that can reach multiple islands
+      this.lastConnectivityCheck = 0;
+      
+      console.log(`GossipProtocol initialized for peer ${localPeerId} with island detection`);
+      
+      // Start connectivity monitoring
+      this.startConnectivityMonitoring();
+    }
+
+    /**
+     * Start monitoring peer connectivity to detect islands
+     */
+    startConnectivityMonitoring() {
+      setInterval(() => {
+        this.checkPeerConnectivity();
+        this.detectIslands();
+      }, this.connectivityCheckInterval);
+    }
+
+    /**
+     * Check connectivity to known peers
+     */
+    checkPeerConnectivity() {
+      const now = Date.now();
+      this.lastConnectivityCheck = now;
+      
+      // Get all known peers from DHT
+      const allContacts = this.dht.routingTable.getAllContacts
+        ? this.dht.routingTable.getAllContacts()
+        : this.dht.routingTable.buckets.flat();
+      
+      for (const contact of allContacts) {
+        if (contact.id === this.localPeerId) continue;
+        
+        this.knownPeers.add(contact.id);
+        
+        // Initialize reachability if not exists
+        if (!this.peerReachability.has(contact.id)) {
+          this.peerReachability.set(contact.id, {
+            lastSeen: now,
+            failures: 0,
+            reachable: true
+          });
+        }
+        
+        // Check if peer hasn't been seen recently
+        const reachability = this.peerReachability.get(contact.id);
+        if (now - reachability.lastSeen > this.connectivityCheckInterval * 2) {
+          reachability.failures++;
+          if (reachability.failures >= this.maxFailures) {
+            reachability.reachable = false;
+            console.log(`Gossip: Marking peer ${contact.id} as unreachable (${reachability.failures} failures)`);
+          }
+        }
+      }
+    }
+
+    /**
+     * Detect peer islands and identify bridge peers
+     */
+    detectIslands() {
+      const reachablePeers = new Set();
+      const unreachablePeers = new Set();
+      
+      for (const [peerId, reachability] of this.peerReachability) {
+        if (reachability.reachable) {
+          reachablePeers.add(peerId);
+        } else {
+          unreachablePeers.add(peerId);
+        }
+      }
+      
+      if (unreachablePeers.size > 0) {
+        console.log(`Gossip: Detected ${unreachablePeers.size} unreachable peers, ${reachablePeers.size} reachable`);
+        
+        // Identify potential bridge peers (peers that have recently relayed messages from unreachable peers)
+        this.identifyBridgePeers(unreachablePeers);
+      }
+    }
+
+    /**
+     * Identify peers that can act as bridges between islands
+     */
+    identifyBridgePeers(unreachablePeers) {
+      const now = Date.now();
+      const recentWindow = 60000; // 1 minute
+      
+      // Look through recent messages to find peers that relayed from unreachable peers
+      for (const [messageId, message] of this.seenMessages) {
+        if (now - message.timestamp > recentWindow) continue;
+        
+        // Check if message originated from unreachable peer but was relayed by reachable peer
+        if (unreachablePeers.has(message.originPeerId)) {
+          for (const relayPeer of message.relayedBy) {
+            if (relayPeer !== this.localPeerId && this.isPeerReachable(relayPeer)) {
+              this.bridgePeers.add(relayPeer);
+              console.log(`Gossip: Identified ${relayPeer} as bridge peer (relayed from unreachable ${message.originPeerId})`);
+            }
+          }
+        }
+      }
+    }
+
+    /**
+     * Check if a peer is currently reachable
+     */
+    isPeerReachable(peerId) {
+      const reachability = this.peerReachability.get(peerId);
+      return reachability ? reachability.reachable : true; // Assume reachable if unknown
+    }
+
+    /**
+     * Update peer reachability when we receive a message
+     */
+    updatePeerReachability(peerId) {
+      const now = Date.now();
+      const reachability = this.peerReachability.get(peerId) || {
+        lastSeen: 0,
+        failures: 0,
+        reachable: true
+      };
+      
+      reachability.lastSeen = now;
+      reachability.failures = 0;
+      reachability.reachable = true;
+      this.peerReachability.set(peerId, reachability);
+    }
+
+    /**
+     * Record a failed send attempt
+     */
+    recordSendFailure(peerId) {
+      const reachability = this.peerReachability.get(peerId) || {
+        lastSeen: 0,
+        failures: 0,
+        reachable: true
+      };
+      
+      reachability.failures++;
+      if (reachability.failures >= this.maxFailures) {
+        reachability.reachable = false;
+        console.log(`Gossip: Marking peer ${peerId} as unreachable after send failure`);
+      }
+      this.peerReachability.set(peerId, reachability);
     }
   
     async _sign(payload) {
@@ -74,53 +221,55 @@ class GossipMessage {
   
     async createMessage(topic, payload) {
       // Store objects as serialized strings to ensure consistent handling
-      // This ensures payload is in a predictable format throughout the gossip process
       const normalizedPayload = payload !== null && typeof payload === 'object' ? JSON.stringify(payload) : payload;
       const signature = await this._sign(normalizedPayload);
       return new GossipMessage(topic, normalizedPayload, this.localPeerId, signature);
     }
   
     /**
-     * Full broadcast to all known peers on first hop.
+     * Smart broadcast that only sends to reachable peers
      */
     async broadcast(topic, payload) {
       const msg = await this.createMessage(topic, payload);
-      // Mark seen & self - store the full message object not just timestamp
       this.seenMessages.set(msg.id, msg);
       msg.relayedBy.add(this.localPeerId);
   
-      console.log(`Gossip: Broadcasting message ${msg.id} on topic '${topic}' to ALL peers`);
+      console.log(`Gossip: Broadcasting message ${msg.id} on topic '${topic}'`);
   
-      // Gather every peer ID
+      // Get all contacts and filter for reachable ones
       const allContacts = this.dht.routingTable.getAllContacts
         ? this.dht.routingTable.getAllContacts()
         : this.dht.routingTable.buckets.flat();
-      const peerIds = allContacts.map(c => c.id).filter(id => id !== this.localPeerId);
+      
+      const reachablePeers = allContacts
+        .map(c => c.id)
+        .filter(id => id !== this.localPeerId && this.isPeerReachable(id));
   
-      // Only track acknowledgments for direct broadcasts from origin peer
-      // Don't track for relayed messages to avoid unnecessary retries
-      if (peerIds.length > 0) {
-        this._trackMessageDelivery(msg.id, peerIds, true); // true = is broadcast
+      console.log(`Gossip: Sending to ${reachablePeers.length} reachable peers (skipping unreachable)`);
+  
+      // Send to reachable peers only - no retry mechanism
+      for (const peerId of reachablePeers) {
+        try {
+          this.sendFunction(peerId, {
+            type: 'gossip',
+            data: { ...msg, relayedBy: Array.from(msg.relayedBy) }
+          });
+        } catch (error) {
+          console.error(`Gossip: Failed to send to ${peerId}:`, error);
+          this.recordSendFailure(peerId);
+        }
       }
   
-      // Send to everyone
-      for (const peerId of peerIds) {
-        this.sendFunction(peerId, {
-          type: 'gossip',
-          data: { ...msg, relayedBy: Array.from(msg.relayedBy) }
-        });
-      }
-  
-      // Local handlers
+      // Process locally
       this._processLocal(msg);
     }
   
     /**
-     * Adaptive publish (gossip) after initial broadcast.
+     * Adaptive publish (gossip) after initial broadcast
      */
     async publish(message) {
       if (this.seenMessages.has(message.id)) return;
-      this.seenMessages.set(message.id, message); // Store complete message object
+      this.seenMessages.set(message.id, message);
       message.relayedBy.add(this.localPeerId);
   
       console.log(`Gossip: Publishing message ${message.id} on topic '${message.topic}'`);
@@ -130,18 +279,17 @@ class GossipMessage {
         return this.broadcast(message.topic, message.payload);
       }
   
-      // Otherwise gossip via fanout - NO RETRY TRACKING for relayed messages
+      // Otherwise gossip via smart fanout
       const peersToNotify = this._selectPeersForGossip(
         message.topic,
         message.originPeerId,
         new Set([...message.relayedBy, this.localPeerId])
       );
 
-      // Make sure we have a clean message object for serialization
       const messageToSend = {
         id: message.id,
         topic: message.topic,
-        payload: message.payload, // Already in correct format from createMessage
+        payload: message.payload,
         originPeerId: message.originPeerId,
         signature: message.signature,
         timestamp: message.timestamp,
@@ -150,33 +298,37 @@ class GossipMessage {
       };
 
       for (const peerId of peersToNotify) {
-        console.log(`Gossip: Relaying ${message.id} → ${peerId}`);
-        this.sendFunction(peerId, {
-          type: 'gossip',
-          data: messageToSend
-        });
+        try {
+          console.log(`Gossip: Relaying ${message.id} → ${peerId}`);
+          this.sendFunction(peerId, {
+            type: 'gossip',
+            data: messageToSend
+          });
+        } catch (error) {
+          console.error(`Gossip: Failed to relay to ${peerId}:`, error);
+          this.recordSendFailure(peerId);
+        }
       }
       this._processLocal(message);
     }
   
     async handleIncomingMessage(raw, fromPeerId) {
+      // Update reachability for sender
+      this.updatePeerReachability(fromPeerId);
+      
+      // No more acknowledgment handling - removed retry mechanism
       if (raw.type === 'gossip_ack') {
-        this._handleAcknowledgment(raw.messageId, fromPeerId);
-        return;
+        return; // Ignore acks since we don't use retries anymore
       }
   
-      // Get message data
       const md = raw.data;
-      // Keep the raw payload for verification - don't parse it yet
       const payload = md.payload;
       
-      // Log the incoming payload for debugging
       console.log(`Gossip: Received raw payload type: ${typeof payload} from ${fromPeerId}`);
       if (typeof payload === 'string' && payload.length < 100) {
         console.log(`Gossip: Payload content: ${payload}`);
       }
   
-      // Build GossipMessage
       const msg = new GossipMessage(
         md.topic,
         payload,
@@ -189,10 +341,9 @@ class GossipMessage {
       msg.relayedBy = new Set(md.relayedBy || []);
       msg.relayedBy.add(fromPeerId);
   
-      // Send acknowledgment only for direct broadcasts (hops = 1)
-      // Don't ack relayed messages to reduce network overhead
-      if (msg.hops === 1) {
-        this._sendAcknowledgment(msg.id, fromPeerId);
+      // Update reachability for origin peer (they're reachable via this relay)
+      if (md.originPeerId !== fromPeerId) {
+        this.updatePeerReachability(md.originPeerId);
       }
   
       // Dedupe & TTL/hops check
@@ -200,24 +351,30 @@ class GossipMessage {
       const valid = await this._verify(msg.payload, msg.signature, msg.originPeerId);
       if (!valid) return console.warn(`Gossip: Dropped invalid ${msg.id}`);
   
-      this.seenMessages.set(msg.id, msg); // Store complete message object
+      this.seenMessages.set(msg.id, msg);
       console.log(`Gossip: Received ${msg.id} from ${fromPeerId} (hops=${msg.hops})`);
   
-      // Local deliver
+      // Local delivery
       this._processLocal(msg);
   
-      // Continue gossip relay - NO RETRY TRACKING for relayed messages
+      // Continue gossip relay
       const peersToNotify = this._selectPeersForGossip(
         msg.topic,
         msg.originPeerId,
         new Set([...msg.relayedBy, this.localPeerId])
       );
+      
       for (const peerId of peersToNotify) {
-        console.log(`Gossip: Relaying ${msg.id} → ${peerId}`);
-        this.sendFunction(peerId, {
-          type: 'gossip',
-          data: { ...msg, relayedBy: Array.from(msg.relayedBy) }
-        });
+        try {
+          console.log(`Gossip: Relaying ${msg.id} → ${peerId}`);
+          this.sendFunction(peerId, {
+            type: 'gossip',
+            data: { ...msg, relayedBy: Array.from(msg.relayedBy) }
+          });
+        } catch (error) {
+          console.error(`Gossip: Failed to relay to ${peerId}:`, error);
+          this.recordSendFailure(peerId);
+        }
       }
   
       this._cleanupSeenMessages();
@@ -226,58 +383,91 @@ class GossipMessage {
     _selectPeersForGossip(topic, originPeerId, excluded = new Set()) {
       const buckets = this.dht.routingTable.buckets;
       if (!Array.isArray(buckets)) return [];
+      
       const allIds = [...new Set(buckets.flat().map(c => c.id))];
       const candidates = allIds.filter(id =>
         id !== this.localPeerId &&
         id !== originPeerId &&
-        !excluded.has(id)
+        !excluded.has(id) &&
+        this.isPeerReachable(id) // Only include reachable peers
       );
       
-      if (candidates.length === 0) return [];
+      if (candidates.length === 0) {
+        // If no reachable candidates, try bridge peers
+        const bridgeCandidates = Array.from(this.bridgePeers).filter(id =>
+          id !== this.localPeerId &&
+          id !== originPeerId &&
+          !excluded.has(id)
+        );
+        
+        if (bridgeCandidates.length > 0) {
+          console.log(`Gossip: Using bridge peers for relay: ${bridgeCandidates.join(', ')}`);
+          return bridgeCandidates.slice(0, 2); // Limit to 2 bridge peers
+        }
+        
+        return [];
+      }
       
-      // In small networks, forward to all available peers for maximum reliability
       const N = allIds.length + 1; // Total network size including self
       
-      // Ensure higher coverage in smaller networks and more reasonable fanout in larger ones
+      // Adaptive fanout based on network size and reachability
       let ratio = N <= 5 ? 1.0 :     // 100% coverage for very small networks
                   N <= 10 ? 0.9 :    // 90% coverage for small networks
                   N <= 15 ? 0.8 :    // 80% coverage for medium networks
                   N <= 25 ? 0.7 :    // 70% coverage for larger networks
                   0.6;               // 60% baseline for very large networks
       
-      // Ensure minimum fanout of at least 3 peers or half the network (whichever is greater)
-      const minFanout = Math.max(
-        3,                              // Always reach at least 3 peers if possible
-        Math.ceil(candidates.length * 0.5)  // Or at least half of available peers
-      );
+      // Increase fanout if we have unreachable peers (to compensate for islands)
+      const unreachableCount = Array.from(this.peerReachability.values())
+        .filter(r => !r.reachable).length;
+      if (unreachableCount > 0) {
+        ratio = Math.min(1.0, ratio + 0.2); // Increase by 20% if islands detected
+        console.log(`Gossip: Increased fanout ratio to ${ratio} due to ${unreachableCount} unreachable peers`);
+      }
       
-      // Calculate actual fanout based on ratio but ensure it meets minimum requirements
+      const minFanout = Math.max(3, Math.ceil(candidates.length * 0.5));
       const fanout = Math.min(
-        candidates.length,              // Can't forward to more peers than available
+        candidates.length,
         Math.max(minFanout, Math.ceil(candidates.length * ratio))
       );
       
-      // If we're close to forwarding to all candidates anyway, just send to everyone
       if (fanout >= candidates.length - 1) return candidates;
   
-      // Semi-random by distance-groups
-      const groups = {};
-      candidates.forEach(id => {
-        const g = id.substring(0, 2);
-        (groups[g] ||= []).push(id);
-      });
-  
+      // Prioritize bridge peers for better island connectivity
+      const bridgeCandidates = candidates.filter(id => this.bridgePeers.has(id));
+      const regularCandidates = candidates.filter(id => !this.bridgePeers.has(id));
+      
       const selected = [];
-      const grpArr = Object.values(groups);
-      const perGrp = Math.max(1, Math.floor(fanout / grpArr.length));
-      grpArr.forEach(g => {
-        const pick = [...g].sort(() => 0.5 - Math.random()).slice(0, perGrp);
-        selected.push(...pick);
-      });
-      if (selected.length < fanout) {
-        const rest = candidates.filter(id => !selected.includes(id));
-        selected.push(...rest.sort(() => 0.5 - Math.random()).slice(0, fanout - selected.length));
+      
+      // Always include some bridge peers if available
+      if (bridgeCandidates.length > 0) {
+        const bridgeCount = Math.min(bridgeCandidates.length, Math.ceil(fanout * 0.3));
+        selected.push(...bridgeCandidates.slice(0, bridgeCount));
       }
+      
+      // Fill remaining slots with regular peers
+      const remainingSlots = fanout - selected.length;
+      if (remainingSlots > 0) {
+        // Group by distance for diversity
+        const groups = {};
+        regularCandidates.forEach(id => {
+          const g = id.substring(0, 2);
+          (groups[g] ||= []).push(id);
+        });
+  
+        const grpArr = Object.values(groups);
+        const perGrp = Math.max(1, Math.floor(remainingSlots / grpArr.length));
+        grpArr.forEach(g => {
+          const pick = [...g].sort(() => 0.5 - Math.random()).slice(0, perGrp);
+          selected.push(...pick);
+        });
+        
+        if (selected.length < fanout) {
+          const rest = regularCandidates.filter(id => !selected.includes(id));
+          selected.push(...rest.sort(() => 0.5 - Math.random()).slice(0, fanout - selected.length));
+        }
+      }
+      
       return selected.slice(0, fanout);
     }
   
@@ -306,7 +496,6 @@ class GossipMessage {
       let handlers = this.messageHandlers.get(message.topic);
       if (!handlers) {
         console.warn(`Gossip: No handlers found for topic '${message.topic}', available topics: [${Array.from(this.messageHandlers.keys()).join(', ')}]`);
-        // Try to find the '*' wildcard handler as a fallback
         const wildcardHandlers = this.messageHandlers.get('*');
         if (!wildcardHandlers) {
           console.warn(`Gossip: No wildcard handlers found either, message will not be delivered`);
@@ -322,7 +511,6 @@ class GossipMessage {
       
       if (typeof data === 'string') {
         try { 
-          // Only try to parse if it looks like JSON
           if (data.startsWith('{') || data.startsWith('[')) {
             data = JSON.parse(data);
             console.log(`Gossip: Successfully parsed JSON payload for local delivery`);
@@ -332,11 +520,9 @@ class GossipMessage {
         } catch (e) {
           console.error(`Gossip: Error parsing payload in _processLocal:`, e);
           console.error(`Gossip: Problematic payload:`, data.substring(0, 100));
-          // Keep the original string if parsing fails
         }
       }
       
-      // Call all subscribed handlers with the processed payload
       console.log(`Gossip: Delivering message on topic '${message.topic}' to ${handlers.size} handlers`);
       for (const h of handlers) {
         try { 
@@ -355,128 +541,32 @@ class GossipMessage {
   
     _cleanupSeenMessages() {
       const now = Date.now();
-      // Handle the new data structure where messages are stored as objects with timestamps
       for (const [id, msgObj] of this.seenMessages) {
         const timestamp = typeof msgObj === 'object' ? msgObj.timestamp : msgObj;
         if (now - timestamp > this.cacheTTL) this.seenMessages.delete(id);
       }
-      for (const [mid, tr] of this.pendingAcknowledgments) {
-        if (now - tr.timestamp > this.cacheTTL) {
-          clearTimeout(tr.timerId);
-          this.pendingAcknowledgments.delete(mid);
+      
+      // Clean up old reachability data
+      for (const [peerId, reachability] of this.peerReachability) {
+        if (now - reachability.lastSeen > this.cacheTTL) {
+          this.peerReachability.delete(peerId);
         }
       }
     }
-  
-    _sendAcknowledgment(messageId, toPeer) {
-      this.sendFunction(toPeer, { type: 'gossip_ack', messageId, from: this.localPeerId });
-    }
-  
-    _handleAcknowledgment(messageId, fromPeer) {
-      const tr = this.pendingAcknowledgments.get(messageId);
-      if (!tr) return;
-      tr.acknowledged.add(fromPeer);
+
+    /**
+     * Get connectivity statistics for debugging
+     */
+    getConnectivityStats() {
+      const reachable = Array.from(this.peerReachability.values()).filter(r => r.reachable).length;
+      const unreachable = Array.from(this.peerReachability.values()).filter(r => !r.reachable).length;
       
-      // Check if we have enough acknowledgments (not necessarily all)
-      const ackRatio = tr.acknowledged.size / tr.expected.length;
-      const isComplete = ackRatio >= 0.8 || tr.acknowledged.size >= Math.min(tr.expected.length, 5);
-      
-      if (isComplete) {
-        clearTimeout(tr.timerId);
-        this.pendingAcknowledgments.delete(messageId);
-        console.log(`Gossip: Sufficient ACKs received for ${messageId} (${tr.acknowledged.size}/${tr.expected.length})`);
-      }
-    }
-  
-    _trackMessageDelivery(messageId, expectedPeers, isBroadcast = false) {
-      if (this.pendingAcknowledgments.has(messageId)) return;
-      
-      // Only track delivery for direct broadcasts, not relayed messages
-      if (!isBroadcast) {
-        console.log(`Gossip: Skipping delivery tracking for relayed message ${messageId}`);
-        return;
-      }
-      
-      // Get original message for retry mechanism
-      const originalMessage = this.seenMessages.get(messageId);
-      if (!originalMessage) {
-        console.warn(`Gossip: Cannot track ${messageId}, message not found in seen messages`);
-        return;
-      }
-      
-      const tr = {
-        expected: expectedPeers,
-        acknowledged: new Set(),
-        timestamp: Date.now(),
-        retryCount: 0,
-        timerId: null,
-        originalMessage, // Store original message for reliable retries
-        isBroadcast
+      return {
+        totalKnownPeers: this.knownPeers.size,
+        reachablePeers: reachable,
+        unreachablePeers: unreachable,
+        bridgePeers: this.bridgePeers.size,
+        lastConnectivityCheck: this.lastConnectivityCheck
       };
-      tr.timerId = setTimeout(() => this._retryMessageDelivery(messageId), this.messageRetryInterval);
-      this.pendingAcknowledgments.set(messageId, tr);
-      console.log(`Gossip: Tracking delivery of ${messageId} to ${expectedPeers.length} peers`);
-    }
-  
-    _retryMessageDelivery(messageId) {
-      const tr = this.pendingAcknowledgments.get(messageId);
-      if (!tr) return;
-      
-      tr.retryCount++;
-      
-      // More aggressive retry limits
-      const maxAttempts = tr.expected.length <= 3 ? 2 : this.maxRetryAttempts;
-      
-      if (tr.retryCount > maxAttempts) {
-        clearTimeout(tr.timerId);
-        this.pendingAcknowledgments.delete(messageId);
-        console.log(`Gossip: Gave up on ${messageId} after ${tr.retryCount} retries`);
-        return;
-      }
-      
-      const unacked = tr.expected.filter(id => !tr.acknowledged.has(id) && id !== this.localPeerId);
-      if (!unacked.length) {
-        clearTimeout(tr.timerId);
-        this.pendingAcknowledgments.delete(messageId);
-        return;
-      }
-      
-      // Check if we have sufficient acknowledgments even without all peers
-      const ackRatio = tr.acknowledged.size / tr.expected.length;
-      if (ackRatio >= 0.7 && tr.acknowledged.size >= 2) {
-        clearTimeout(tr.timerId);
-        this.pendingAcknowledgments.delete(messageId);
-        console.log(`Gossip: Sufficient coverage achieved for ${messageId}, stopping retries`);
-        return;
-      }
-      
-      // Retrieve the original message
-      const original = tr.originalMessage || this.seenMessages.get(messageId);
-      if (!original) {
-        console.warn(`Gossip: Cannot retry ${messageId}, original message not found`);
-        clearTimeout(tr.timerId);
-        this.pendingAcknowledgments.delete(messageId);
-        return;
-      }
-  
-      // Exponential backoff with jitter
-      const baseInterval = this.messageRetryInterval * Math.pow(1.5, tr.retryCount - 1);
-      const jitter = Math.random() * 500; // Add up to 500ms jitter
-      const nextInterval = Math.min(baseInterval + jitter, 8000);
-      
-      console.log(`Gossip: Retry #${tr.retryCount} for ${messageId} to ${unacked.length} peers (next in ${Math.round(nextInterval)}ms)`);
-      
-      for (const peerId of unacked) {
-        try {
-          this.sendFunction(peerId, {
-            type: 'gossip',
-            data: { ...original, relayedBy: Array.from(original.relayedBy) }
-          });
-        } catch (err) {
-          console.error(`Gossip: Error sending retry to ${peerId}:`, err);
-        }
-      }
-      
-      tr.timerId = setTimeout(() => this._retryMessageDelivery(messageId), nextInterval);
     }
   }

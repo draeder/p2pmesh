@@ -32,8 +32,8 @@ export class PeerDiscovery {
       if (this.peerManager.getPeerCount() >= this.maxPeers) break;
       if (contact.id !== this.localPeerId && !this.peerManager.getPeers().has(contact.id)) {
         console.log(`Attempting to establish WebRTC connection with Kademlia peer: ${contact.id}`);
-        // Initiate WebRTC connection (simple-peer)
-        await this.peerManager.connectToPeer(contact.id, true);
+        // Use requestConnection to properly enforce maxPeers limit
+        await this.peerManager.requestConnection(contact.id, true);
         // The 'signal' event from newPeer will send the offer via transport.send
         // This assumes the transport can route a 'signal' to a Kademlia peer ID.
         // If Kademlia peers are only known by ID, the transport needs to resolve ID to a routable address.
@@ -109,7 +109,13 @@ export class PeerDiscovery {
       
       try {
         console.log(`Trying peer-assisted connection to ${alternatePeerId}...`);
-        await this.peerManager.connectToPeer(alternatePeerId, true);
+        // Use requestConnection to properly enforce maxPeers limit
+        const connectionAllowed = await this.peerManager.requestConnection(alternatePeerId, true);
+        
+        if (!connectionAllowed) {
+          console.log(`Connection to ${alternatePeerId} was rejected due to maxPeers limit.`);
+          continue; // Try next peer
+        }
         
         // First attempt direct relay through any existing connected peers
         let relayAttempted = false;

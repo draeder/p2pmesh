@@ -47,6 +47,21 @@ export class PeerManager {
       peerConnectionAttempts: this.peerConnectionAttempts
     });
     
+    // Initialize connection manager first
+    this.connectionManager = new ConnectionManager({
+      localPeerId: this.localPeerId,
+      maxPeers: this.maxPeers,
+      iceServers: this.iceServers,
+      kademlia: this.kademlia,
+      transportInstance: this.transportInstance,
+      eventHandlers: this.eventHandlers,
+      peers: this.peers,
+      peerConnectionAttempts: this.peerConnectionAttempts,
+      pendingConnections: this.pendingConnections,
+      setupPeerEvents: null // Will be set after event manager is created
+    });
+    
+    // Initialize event manager with connection manager reference
     this.eventManager = new EventManager({
       localPeerId: this.localPeerId,
       eventHandlers: this.eventHandlers,
@@ -58,21 +73,12 @@ export class PeerManager {
       transportInstance: this.transportInstance,
       signalingOptimizer: this.signalingOptimizer,
       dataHandler: this.dataHandler,
+      connectionManager: this.connectionManager, // Pass connection manager reference
       CONNECTION_TIMEOUT: this.CONNECTION_TIMEOUT
     });
     
-    this.connectionManager = new ConnectionManager({
-      localPeerId: this.localPeerId,
-      maxPeers: this.maxPeers,
-      iceServers: this.iceServers,
-      kademlia: this.kademlia,
-      transportInstance: this.transportInstance,
-      eventHandlers: this.eventHandlers,
-      peers: this.peers,
-      peerConnectionAttempts: this.peerConnectionAttempts,
-      pendingConnections: this.pendingConnections,
-      setupPeerEvents: this.eventManager.setupPeerEvents.bind(this.eventManager)
-    });
+    // Now set the setupPeerEvents callback in connection manager
+    this.connectionManager.setupPeerEvents = this.eventManager.setupPeerEvents.bind(this.eventManager);
     
     this.relayManager = new RelayManager({
       localPeerId: this.localPeerId,
@@ -175,6 +181,21 @@ export class PeerManager {
    */
   getAlternativePeers() {
     return this.connectionManager.getAlternativePeers();
+  }
+
+  /**
+   * Get connectivity statistics from connection manager
+   * @returns {Object} Connectivity statistics
+   */
+  getConnectivityStats() {
+    return this.connectionManager.getConnectivityStats();
+  }
+
+  /**
+   * Ensure minimum connectivity (public method to trigger reconnection)
+   */
+  async ensureMinimumConnectivity() {
+    return await this.connectionManager.ensureMinimumConnectivity();
   }
 
   /**

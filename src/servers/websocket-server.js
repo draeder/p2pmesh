@@ -1,4 +1,4 @@
-// src/servers/signaling-server.js
+// src/servers/websocket-server.js
 import { WebSocketServer } from 'ws';
 // Import Kademlia utilities from the parent directory
 import { calculateDistance, K as KADEMLIA_K } from '../kademlia.js';
@@ -118,6 +118,7 @@ wss.on('connection', (ws) => {
       case 'answer': // Specific SDP answer
       case 'candidate': // Specific ICE candidate
       case 'ack': // Acknowledge message for connection setup
+      case 'connection_rejected': // Connection rejection message
         if (parsedMessage.to && peers.has(parsedMessage.to)) {
           const recipientWs = peers.get(parsedMessage.to);
           // Check if recipientWs is defined and its readyState is OPEN
@@ -125,7 +126,7 @@ wss.on('connection', (ws) => {
             // Add 'from' field if not present, using currentPeerId
             const messageToSend = { ...parsedMessage, from: currentPeerId };
             recipientWs.send(JSON.stringify(messageToSend));
-            console.log(`Relayed message from ${currentPeerId} to ${parsedMessage.to}`);
+            console.log(`Relayed ${parsedMessage.type} message from ${currentPeerId} to ${parsedMessage.to}`);
           } else {
             console.warn(`Recipient ${parsedMessage.to} is not open. Removing.`);
             peers.delete(parsedMessage.to);

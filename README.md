@@ -29,7 +29,7 @@ p2pmesh/
 │   │   └── index.html
 │   ├── chat-node/              # Node.js chat application example
 │   │   └── app.js
-│   ├── signaling-server.js     # WebSocket signaling server
+│   ├── websocket-server.js     # WebSocket signaling server
 │   └── signaling-optimization-demo.js  # Demo showing signaling optimization
 ├── src/
 │   ├── transports/

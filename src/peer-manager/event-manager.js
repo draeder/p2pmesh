@@ -15,6 +15,7 @@ export class EventManager {
     this.transportInstance = options.transportInstance;
     this.signalingOptimizer = options.signalingOptimizer;
     this.dataHandler = options.dataHandler;
+    this.connectionManager = options.connectionManager; // Reference to connection manager
     this.CONNECTION_TIMEOUT = options.CONNECTION_TIMEOUT || 15000;
   }
 
@@ -75,9 +76,17 @@ export class EventManager {
 
     peer.on('close', () => {
       console.log(`Connection closed with peer: ${remotePeerId}`);
-      this.peers.delete(remotePeerId);
-      this.peerConnectionAttempts.delete(remotePeerId); // Clean up connection tracking
-      this.pendingConnections.delete(remotePeerId);
+      
+      // Notify connection manager about disconnection for reconnection logic
+      if (this.connectionManager && this.connectionManager.onPeerDisconnected) {
+        this.connectionManager.onPeerDisconnected(remotePeerId);
+      } else {
+        // Fallback cleanup if connection manager not available
+        this.peers.delete(remotePeerId);
+        this.peerConnectionAttempts.delete(remotePeerId);
+        this.pendingConnections.delete(remotePeerId);
+      }
+      
       this.kademlia.routingTable.removeContact(remotePeerId);
       
       // Notify SignalingOptimizer about peer disconnection
@@ -94,9 +103,17 @@ export class EventManager {
 
     peer.on('error', (err) => {
       console.error(`Error with peer ${remotePeerId}:`, err);
-      this.peers.delete(remotePeerId);
-      this.peerConnectionAttempts.delete(remotePeerId); // Clean up connection tracking
-      this.pendingConnections.delete(remotePeerId);
+      
+      // Notify connection manager about disconnection for reconnection logic
+      if (this.connectionManager && this.connectionManager.onPeerDisconnected) {
+        this.connectionManager.onPeerDisconnected(remotePeerId);
+      } else {
+        // Fallback cleanup if connection manager not available
+        this.peers.delete(remotePeerId);
+        this.peerConnectionAttempts.delete(remotePeerId);
+        this.pendingConnections.delete(remotePeerId);
+      }
+      
       this.kademlia.routingTable.removeContact(remotePeerId);
       
       if (this.eventHandlers['peer:error']) {
@@ -137,9 +154,17 @@ export class EventManager {
       if (peer) {
         console.log(`Destroying timed out peer connection to ${peerId}`);
         peer.destroy();
-        this.peers.delete(peerId);
-        this.peerConnectionAttempts.delete(peerId);
-        this.pendingConnections.delete(peerId);
+        
+        // Notify connection manager about timeout for reconnection logic
+        if (this.connectionManager && this.connectionManager.onPeerDisconnected) {
+          this.connectionManager.onPeerDisconnected(peerId);
+        } else {
+          // Fallback cleanup if connection manager not available
+          this.peers.delete(peerId);
+          this.peerConnectionAttempts.delete(peerId);
+          this.pendingConnections.delete(peerId);
+        }
+        
         this.kademlia.routingTable.removeContact(peerId);
         
         // Emit timeout event

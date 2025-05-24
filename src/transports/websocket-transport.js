@@ -138,6 +138,17 @@ export class WebSocketTransport extends AbstractTransport {
                 }
               }
               break;
+            case 'connection_rejected': // Connection rejection message from another peer
+              if (message.from) {
+                console.log(`WebSocketTransport: Received connection_rejected from ${message.from}:`, message.reason || 'No reason provided');
+                this.emit('connection_rejected', { 
+                  from: message.from, 
+                  reason: message.reason,
+                  maxPeers: message.maxPeers,
+                  alternativePeers: message.alternativePeers || []
+                });
+              }
+              break;
             default:
               console.warn('WebSocketTransport: Received unknown message type:', message.type);
           }

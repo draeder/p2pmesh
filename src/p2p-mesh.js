@@ -170,26 +170,25 @@ export class P2PMesh {
       peer.signal(signal);
     } else {
       // Potentially a new peer trying to connect (WebRTC handshake)
-      if (peers.size < this.maxPeers) {
-        console.log(`Received signal for WebRTC from new peer ${from}, attempting to connect.`);
-        await this.peerManager.connectToPeer(from, false);
+      // Use requestConnection to properly enforce maxPeers limit
+      console.log(`Received signal for WebRTC from new peer ${from}, requesting connection.`);
+      const connectionAllowed = await this.peerManager.requestConnection(from, false);
+      
+      if (connectionAllowed) {
         const newPeer = peers.get(from);
         if (newPeer) {
           newPeer.signal(signal);
         }
       } else {
-        // Max peers reached, implement eviction strategy
-        const evicted = this.peerManager.evictFurthestPeer(from);
-        if (evicted) {
-          // Connect the new peer
-          await this.peerManager.connectToPeer(from, false);
-          const newPeer = peers.get(from);
-          if (newPeer) {
-            newPeer.signal(signal);
-          }
-        } else {
-          console.log(`Max peers (${this.maxPeers}) reached. Ignoring signal from ${from}.`);
-        }
+        console.log(`Connection to ${from} was rejected due to maxPeers limit or other constraints.`);
+        // Send rejection message with alternative peers
+        const alternativePeers = this.peerManager.getAlternativePeers();
+        this.transportInstance.send(from, {
+          type: 'connection_rejected',
+          reason: 'max_peers_reached',
+          maxPeers: this.maxPeers,
+          alternativePeers: alternativePeers
+        });
       }
     }
   }
@@ -201,16 +200,21 @@ export class P2PMesh {
   async handleConnectRequest(from) {
     const peers = this.peerManager.getPeers();
     
-    if (peers.size < this.maxPeers && !peers.has(from)) {
-      console.log(`Received connect request for WebRTC from ${from}, initiating connection.`);
-      await this.peerManager.connectToPeer(from, true);
-    } else if (!peers.has(from)) { // Max peers reached, and not already connected/connecting
-      const evicted = this.peerManager.evictFurthestPeer(from);
-      if (evicted) {
-        // Connect the new peer
-        await this.peerManager.connectToPeer(from, true);
-      } else {
-        console.log(`Max peers (${this.maxPeers}) reached. Ignoring connect_request from ${from}.`);
+    if (!peers.has(from)) {
+      console.log(`Received connect request for WebRTC from ${from}, requesting connection.`);
+      // Use requestConnection to properly enforce maxPeers limit
+      const connectionAllowed = await this.peerManager.requestConnection(from, true);
+      
+      if (!connectionAllowed) {
+        console.log(`Connection request from ${from} was rejected due to maxPeers limit or other constraints.`);
+        // Send rejection message with alternative peers
+        const alternativePeers = this.peerManager.getAlternativePeers();
+        this.transportInstance.send(from, {
+          type: 'connection_rejected',
+          reason: 'max_peers_reached',
+          maxPeers: this.maxPeers,
+          alternativePeers: alternativePeers
+        });
       }
     } else {
       console.log(`Already have a connection or pending with ${from}. Ignoring connect_request.`);
@@ -379,7 +383,8 @@ export class P2PMesh {
    * @param {string} targetPeerId - Target peer ID
    */
   async _connectToPeer(targetPeerId) {
-    await this.peerManager.connectToPeer(targetPeerId, true);
+    // Use requestConnection instead of connectToPeer to enforce maxPeers
+    return await this.peerManager.requestConnection(targetPeerId, true);
   }
 
   /**
