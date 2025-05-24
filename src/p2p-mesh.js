@@ -63,7 +63,11 @@ export class P2PMesh {
         'peer:error': (data) => this.emit('peer:error', data),
         'peer:evicted': (data) => this.emit('peer:evicted', data),
         'message': (data) => this.emit('message', data),
-        'signal': (data) => this.emit('signal', data),
+        'signal': (data) => {
+          // FIXED: Don't emit signal events to prevent circular handling
+          // Signals are already handled directly by transport event handlers
+          console.log(`Signal event from peer manager (not emitted to prevent circular handling): ${data.from}`);
+        },
         'gossip': (data, remotePeerId) => this.gossipProtocol?.handleIncomingMessage(data, remotePeerId),
         'reconnection_data': (data, remotePeerId) => this.handleReconnectionData(data, remotePeerId),
         // FIXED: Handle Kademlia RPC via direct WebRTC
@@ -73,6 +77,9 @@ export class P2PMesh {
 
     // FIXED: Wire up Kademlia with PeerManager for direct WebRTC communication
     this.kademliaInstance.setPeerManager(this.peerManager);
+    
+    // FIXED: Set up bidirectional reference for routing table connection status checking
+    this.kademliaInstance.routingTable.dht = this.kademliaInstance;
 
     // Initialize PeerDiscovery
     this.peerDiscovery = new PeerDiscovery({
@@ -230,7 +237,7 @@ export class P2PMesh {
   }
 
   /**
-   * Handles incoming WebRTC signals
+   * FIXED: Handles incoming WebRTC signals with proper state management
    * @param {string} from - Peer ID sending the signal
    * @param {Object} signal - WebRTC signal data
    */
@@ -239,17 +246,56 @@ export class P2PMesh {
     let peer = peers.get(from);
     
     if (peer) {
-      peer.signal(signal);
+      // FIXED: Check peer connection state before applying signal
+      if (peer.destroyed) {
+        console.log(`Ignoring signal from ${from}: peer connection is destroyed`);
+        return;
+      }
+      
+      // FIXED: Add proper signal state validation to prevent "stable" state errors
+      if (!this.isSignalValidForCurrentState(peer, signal)) {
+        console.log(`Ignoring signal from ${from}: signal type ${signal.type || 'candidate'} not valid for current state ${peer._pc?.signalingState || 'unknown'}`);
+        return;
+      }
+      
+      try {
+        peer.signal(signal);
+        console.log(`Applied ${signal.type || 'ICE candidate'} signal from ${from}`);
+      } catch (error) {
+        console.error(`Error applying signal from ${from}:`, error);
+        // If signal application fails, clean up the connection
+        if (peer && !peer.destroyed) {
+          peer.destroy();
+        }
+        peers.delete(from);
+        this.peerManager.peerConnectionAttempts.delete(from);
+        this.peerManager.pendingConnections.delete(from);
+      }
     } else {
       // Potentially a new peer trying to connect (WebRTC handshake)
-      // Use requestConnection to properly enforce maxPeers limit
-      console.log(`Received signal for WebRTC from new peer ${from}, requesting connection.`);
-      const connectionAllowed = await this.peerManager.requestConnection(from, false);
+      // Use deterministic initiator selection to prevent race conditions
+      // The peer with the lexicographically smaller ID becomes the initiator
+      const shouldBeInitiator = this.localPeerId < from;
+      
+      console.log(`Received signal for WebRTC from new peer ${from}, requesting connection (initiator: ${shouldBeInitiator}).`);
+      const connectionAllowed = await this.peerManager.requestConnection(from, shouldBeInitiator);
       
       if (connectionAllowed) {
         const newPeer = peers.get(from);
-        if (newPeer) {
-          newPeer.signal(signal);
+        if (newPeer && !newPeer.destroyed) {
+          try {
+            newPeer.signal(signal);
+            console.log(`Applied initial ${signal.type || 'ICE candidate'} signal from new peer ${from}`);
+          } catch (error) {
+            console.error(`Error applying initial signal from ${from}:`, error);
+            // Clean up failed connection
+            if (newPeer && !newPeer.destroyed) {
+              newPeer.destroy();
+            }
+            peers.delete(from);
+            this.peerManager.peerConnectionAttempts.delete(from);
+            this.peerManager.pendingConnections.delete(from);
+          }
         }
       } else {
         console.log(`Connection to ${from} was rejected due to maxPeers limit or other constraints.`);
@@ -266,6 +312,37 @@ export class P2PMesh {
   }
 
   /**
+   * FIXED: Validates if a signal is appropriate for the current peer connection state
+   * @param {Object} peer - SimplePeer instance
+   * @param {Object} signal - WebRTC signal data
+   * @returns {boolean} True if signal is valid for current state
+   */
+  isSignalValidForCurrentState(peer, signal) {
+    // Always allow ICE candidates
+    if (signal.candidate) {
+      return true;
+    }
+    
+    // Get the current signaling state
+    const signalingState = peer._pc?.signalingState || 'closed';
+    
+    // For offers
+    if (signal.type === 'offer') {
+      // Offers are valid when we don't have a remote description yet
+      return signalingState === 'stable' || signalingState === 'closed';
+    }
+    
+    // For answers
+    if (signal.type === 'answer') {
+      // Answers are only valid when we have a local offer but no remote answer
+      return signalingState === 'have-local-offer' || signalingState === 'have-remote-pranswer';
+    }
+    
+    // Default to allowing the signal if we can't determine the state
+    return true;
+  }
+
+  /**
    * Handles incoming connection requests
    * @param {string} from - Peer ID requesting connection
    */
@@ -273,9 +350,13 @@ export class P2PMesh {
     const peers = this.peerManager.getPeers();
     
     if (!peers.has(from)) {
-      console.log(`Received connect request for WebRTC from ${from}, requesting connection.`);
+      // Use deterministic initiator selection to prevent race conditions
+      // The peer with the lexicographically smaller ID becomes the initiator
+      const shouldBeInitiator = this.localPeerId < from;
+      
+      console.log(`Received connect request for WebRTC from ${from}, requesting connection (initiator: ${shouldBeInitiator}).`);
       // Use requestConnection to properly enforce maxPeers limit
-      const connectionAllowed = await this.peerManager.requestConnection(from, true);
+      const connectionAllowed = await this.peerManager.requestConnection(from, shouldBeInitiator);
       
       if (!connectionAllowed) {
         console.log(`Connection request from ${from} was rejected due to maxPeers limit or other constraints.`);
@@ -452,10 +533,7 @@ export class P2PMesh {
       }
     }
     
-    // Special handling for signal events - needed for relay_signal processing
-    if (event === 'signal' && data && data.from && data.signal) {
-      this.handleIncomingSignal(data.from, data.signal);
-    }
+    // REMOVED: Circular signal handling that was preventing connections
   }
 
   /**
@@ -471,8 +549,12 @@ export class P2PMesh {
    * @param {string} targetPeerId - Target peer ID
    */
   async _connectToPeer(targetPeerId) {
+    // Use deterministic initiator selection to prevent race conditions
+    // The peer with the lexicographically smaller ID becomes the initiator
+    const shouldBeInitiator = this.localPeerId < targetPeerId;
+    
     // Use requestConnection instead of connectToPeer to enforce maxPeers
-    return await this.peerManager.requestConnection(targetPeerId, true);
+    return await this.peerManager.requestConnection(targetPeerId, shouldBeInitiator);
   }
 
   /**

@@ -12,7 +12,8 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "start:server": "node src/servers/websocket-server.js",
-    "dev:chat": "npx http-server . -p 8081 -c-1 -o examples/chat-browser/index.html"
+    "dev:chat": "npx http-server . -p 8081 -c-1 -o examples/chat-browser/index.html",
+    "dev:node": "node examples/chat-node/app.js"
   },
   "repository": {
     "type": "git",

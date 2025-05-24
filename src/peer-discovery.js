@@ -2,7 +2,7 @@
 
 /**
  * Handles peer discovery and connection strategies
- * STABILIZED: Conservative peer discovery with proper backoff to prevent churn
+ * FIXED: More aggressive initial discovery to allow connections
  */
 export class PeerDiscovery {
   constructor(options = {}) {
@@ -17,37 +17,58 @@ export class PeerDiscovery {
     this._reconnectionDataTimestamp = 0;
     this._alternativePeers = [];
     
-    // STABILIZED: Conservative discovery with longer backoff
+    // FIXED: More aggressive initial discovery, conservative after connections
     this.failedDiscoveryAttempts = 0;
-    this.maxFailedAttempts = 3; // REDUCED: Stop trying sooner when no peers available
-    this.backoffMultiplier = 3; // INCREASED: More aggressive backoff
-    this.baseDiscoveryInterval = 30000; // INCREASED: Start with 30 seconds
-    this.maxDiscoveryInterval = 300000; // INCREASED: Max 5 minutes between attempts
+    this.maxFailedAttempts = 5; // Allow more attempts for initial connections
+    this.backoffMultiplier = 2; // Less aggressive backoff
+    this.baseDiscoveryInterval = 5000; // FIXED: Start with 5 seconds for faster initial connections
+    this.maxDiscoveryInterval = 60000; // FIXED: Max 1 minute between attempts
     this.lastSuccessfulDiscovery = 0;
     this.isDiscoveryActive = false; // Prevent overlapping discovery attempts
     this.discoveryPaused = false; // ADDED: Pause discovery when no peers available
     
-    // STABILIZED: Start discovery with longer initial delay
+    // ENHANCED: Additional properties for improved discovery
+    this.lastDiscoveryAttempt = 0;
+    this.discoveryAttempts = 0;
+    this.baseDiscoveryDelay = 2000; // FIXED: Shorter initial delay
+    this.maxDiscoveryDelay = 30000; // FIXED: Shorter max delay
+    this.discoveryBackoff = this.baseDiscoveryDelay;
+    this.isDiscovering = false;
+    
+    // FIXED: Start discovery immediately for initial connections
     this.startSmartDiscovery();
   }
 
   /**
-   * STABILIZED: Conservative peer discovery with exponential backoff
-   * Prevents infinite loops and reduces network churn
+   * FIXED: More aggressive peer discovery for initial connections
    */
   startSmartDiscovery() {
-    console.log(`PEER-DISCOVERY: Started conservative discovery for peer ${this.localPeerId}`);
+    console.log(`PEER-DISCOVERY: Started discovery for peer ${this.localPeerId}`);
     
-    // Start with initial delay to let the network settle
-    this.scheduleNextDiscovery(this.baseDiscoveryInterval);
+    // FIXED: Start immediately if no connections, otherwise use base interval
+    const initialDelay = this.peerManager.getPeerCount() === 0 ? 1000 : this.baseDiscoveryInterval;
+    this.scheduleNextDiscovery(initialDelay);
   }
 
   /**
-   * STABILIZED: Determine if we should attempt discovery based on conservative logic
+   * FIXED: More permissive discovery logic to allow initial connections
    */
   shouldAttemptDiscovery() {
-    // Don't attempt if discovery is already active or paused
-    if (this.isDiscoveryActive || this.discoveryPaused) {
+    // Don't attempt if discovery is already active
+    if (this.isDiscoveryActive) {
+      return false;
+    }
+
+    // FIXED: Don't pause discovery if we have no connections at all
+    const currentPeerCount = this.peerManager.getPeerCount();
+    if (currentPeerCount === 0) {
+      console.log(`PEER-DISCOVERY: ${this.localPeerId} - No connections, forcing discovery attempt`);
+      this.discoveryPaused = false; // Unpause if we have no connections
+      return true;
+    }
+
+    // Don't attempt if discovery is paused (but only if we have some connections)
+    if (this.discoveryPaused) {
       return false;
     }
 
@@ -58,8 +79,8 @@ export class PeerDiscovery {
       return false;
     }
 
-    // Always attempt if we haven't failed too many times
-    if (this.failedDiscoveryAttempts < this.maxFailedAttempts) {
+    // FIXED: Be more permissive with failed attempts for initial connections
+    if (this.failedDiscoveryAttempts < this.maxFailedAttempts || currentPeerCount === 0) {
       return true;
     }
 
@@ -104,7 +125,7 @@ export class PeerDiscovery {
   }
 
   /**
-   * STABILIZED: Schedule next discovery attempt with conservative timing
+   * FIXED: More aggressive scheduling for initial connections
    */
   scheduleNextDiscovery(interval) {
     if (this.discoveryTimeout) {
@@ -114,8 +135,10 @@ export class PeerDiscovery {
     this.discoveryTimeout = setTimeout(async () => {
       const currentPeerCount = this.peerManager.getPeerCount();
       
-      // STABILIZED: Only discover if we're significantly under-connected
-      if (currentPeerCount >= Math.floor(this.maxPeers * 0.8)) {
+      // FIXED: Be more aggressive when we have no connections
+      if (currentPeerCount === 0) {
+        console.log(`PEER-DISCOVERY: ${this.localPeerId} has no connections, attempting immediate discovery...`);
+      } else if (currentPeerCount >= Math.floor(this.maxPeers * 0.8)) {
         // We have enough peers, schedule next check with longer interval
         this.scheduleNextDiscovery(this.maxDiscoveryInterval);
         return;
@@ -134,13 +157,15 @@ export class PeerDiscovery {
           this.failedDiscoveryAttempts = 0;
           this.lastSuccessfulDiscovery = Date.now();
           this.discoveryPaused = false;
-          this.scheduleNextDiscovery(this.baseDiscoveryInterval);
+          // FIXED: Use shorter interval after successful connections
+          const nextInterval = currentPeerCount < 2 ? this.baseDiscoveryInterval / 2 : this.baseDiscoveryInterval;
+          this.scheduleNextDiscovery(nextInterval);
         } else {
           // No peers found, increase backoff
           this.failedDiscoveryAttempts++;
           
           // ENHANCED: If we've failed max attempts, pause discovery
-          if (this.failedDiscoveryAttempts >= this.maxFailedAttempts) {
+          if (this.failedDiscoveryAttempts >= this.maxFailedAttempts && currentPeerCount > 0) {
             console.log(`PEER-DISCOVERY: ${this.localPeerId} - Max discovery attempts reached, pausing discovery for extended period`);
             this.discoveryPaused = true;
             this.scheduleNextDiscovery(this.maxDiscoveryInterval * 2); // Extra long pause
@@ -163,197 +188,248 @@ export class PeerDiscovery {
   }
 
   /**
-   * STABILIZED: Conservative peer discovery with proper return value
-   * Returns number of peers found/connected to help with backoff logic
+   * ENHANCED: Kademlia-aware peer discovery with stability improvements
    */
   async findAndConnectPeers() {
-    const currentPeerCount = this.peerManager.getPeerCount();
-    
-    // STABILIZED: Only discover if we're below 80% of maxPeers
-    if (currentPeerCount >= Math.floor(this.maxPeers * 0.8)) {
-      console.log(`PEER-DISCOVERY: ${this.localPeerId} has sufficient peers (${currentPeerCount}/${this.maxPeers})`);
+    if (this.isDiscovering) {
+      console.log('PEER-DISCOVERY: Already discovering, skipping...');
       return 0;
     }
 
-    const needed = this.maxPeers - currentPeerCount;
-    console.log(`PEER-DISCOVERY: ${this.localPeerId} seeking ${needed} more connections`);
-
-    // STABILIZED: Conservative discovery with limited strategies
-    return await this.discoverPeersConservatively(Math.min(needed, 2)); // Max 2 connections per discovery
-  }
-
-  /**
-   * STABILIZED: Conservative peer discovery that returns number of peers found
-   */
-  async discoverPeersConservatively(needed) {
-    let totalFound = 0;
+    this.isDiscovering = true;
     
-    // STABILIZED: Use fewer strategies and add delays between them
-    const strategies = [
-      () => this.discoverViaRoutingTable(needed - totalFound),
-      () => this.discoverViaReconnectionData(needed - totalFound),
-      () => this.discoverViaKademlia(needed - totalFound)
-    ];
-
-    for (const strategy of strategies) {
+    try {
       const currentPeerCount = this.peerManager.getPeerCount();
-      if (currentPeerCount >= this.maxPeers || totalFound >= needed) break;
-      
-      try {
-        const found = await strategy();
-        totalFound += found;
-        
-        // STABILIZED: Longer delay between strategies to reduce network load
-        if (found > 0) {
-          await new Promise(resolve => setTimeout(resolve, 2000)); // 2 second delay after success
-        } else {
-          await new Promise(resolve => setTimeout(resolve, 1000)); // 1 second delay after failure
-        }
-      } catch (error) {
-        console.error('PEER-DISCOVERY: Strategy failed:', error);
-        await new Promise(resolve => setTimeout(resolve, 1000));
-      }
-    }
-    
-    return totalFound;
-  }
+      const connectedPeerCount = this.peerManager.getConnectedPeerCount();
+      console.log(`PEER-DISCOVERY: Current peer count: ${currentPeerCount}/${this.maxPeers} (${connectedPeerCount} connected)`);
 
-  /**
-   * STABILIZED: Discover peers via routing table with return value
-   */
-  async discoverViaRoutingTable(needed) {
-    try {
-      const allContacts = this.kademlia.routingTable.getAllContacts
-        ? this.kademlia.routingTable.getAllContacts()
-        : this.kademlia.routingTable.buckets.flat();
-
-      const availablePeers = allContacts
-        .map(c => c.id)
-        .filter(id => 
-          id !== this.localPeerId && 
-          !this.peerManager.getPeers().has(id)
-        )
-        .slice(0, needed); // STABILIZED: Limit to needed peers
-
-      if (availablePeers.length === 0) {
-        console.log('PEER-DISCOVERY: No peers available in routing table');
+      // FIXED: Be more aggressive when we have few connections
+      const minDesiredPeers = Math.max(1, Math.floor(this.maxPeers * 0.4));
+      if (connectedPeerCount >= minDesiredPeers && currentPeerCount >= this.maxPeers) {
+        console.log(`PEER-DISCOVERY: Sufficient connectivity (${connectedPeerCount}/${minDesiredPeers} desired), skipping discovery`);
         return 0;
       }
 
-      console.log('PEER-DISCOVERY: Found potential peers via routing table:', availablePeers);
-
-      let connected = 0;
-      for (const peerId of availablePeers) {
-        if (connected >= needed) break;
-        if (this.peerManager.getPeerCount() >= this.maxPeers) break;
-        
-        console.log(`PEER-DISCOVERY: Attempting connection to routing table peer: ${peerId}`);
-        const success = await this.peerManager.requestConnection(peerId, true);
-        if (success) {
-          connected++;
-          // STABILIZED: Add delay between connection attempts
-          await new Promise(resolve => setTimeout(resolve, 500));
-        }
-      }
-      
-      return connected;
-    } catch (error) {
-      console.error('PEER-DISCOVERY: Routing table discovery failed:', error);
-      return 0;
-    }
-  }
-
-  /**
-   * STABILIZED: Discover peers via reconnection data with return value
-   */
-  async discoverViaReconnectionData(needed) {
-    if (!this._reconnectionPeers || this._reconnectionPeers.length === 0) {
-      console.log('PEER-DISCOVERY: No reconnection data available');
-      return 0;
-    }
-
-    try {
-      console.log('PEER-DISCOVERY: Attempting reconnection data discovery...');
-      
-      const availablePeers = this._reconnectionPeers
-        .filter(peerId => 
-          peerId !== this.localPeerId && 
-          !this.peerManager.getPeers().has(peerId)
-        )
-        .slice(0, needed); // STABILIZED: Limit to needed peers
-
-      if (availablePeers.length === 0) {
-        console.log('PEER-DISCOVERY: No available peers in reconnection data');
+      // FIXED: Reduce backoff for initial connections
+      const now = Date.now();
+      if (currentPeerCount > 0 && now - this.lastDiscoveryAttempt < this.discoveryBackoff) {
+        console.log(`PEER-DISCOVERY: In backoff period, waiting ${this.discoveryBackoff - (now - this.lastDiscoveryAttempt)}ms`);
         return 0;
       }
 
-      let connected = 0;
-      for (const peerId of availablePeers) {
-        if (connected >= needed) break;
-        if (this.peerManager.getPeerCount() >= this.maxPeers) break;
-        
-        console.log(`PEER-DISCOVERY: Attempting connection to reconnection peer: ${peerId}`);
-        const success = await this.peerManager.requestConnection(peerId, true);
-        if (success) {
-          connected++;
-          // STABILIZED: Add delay between connection attempts
-          await new Promise(resolve => setTimeout(resolve, 500));
-        }
+      this.lastDiscoveryAttempt = now;
+      this.discoveryAttempts++;
+      
+      // FIXED: Less aggressive backoff for initial connections
+      if (currentPeerCount === 0) {
+        this.discoveryBackoff = this.baseDiscoveryDelay; // No backoff when no connections
+      } else {
+        this.discoveryBackoff = Math.min(
+          this.baseDiscoveryDelay * Math.pow(2, Math.max(0, this.discoveryAttempts - 3)),
+          this.maxDiscoveryDelay
+        );
       }
-      
-      return connected;
-    } catch (error) {
-      console.error('PEER-DISCOVERY: Reconnection data discovery failed:', error);
-      return 0;
-    }
-  }
 
-  /**
-   * STABILIZED: Discover peers via Kademlia DHT with return value
-   */
-  async discoverViaKademlia(needed) {
-    try {
-      // STABILIZED: Only use Kademlia discovery as last resort
-      console.log('PEER-DISCOVERY: Attempting Kademlia discovery as last resort...');
-      const potentialPeers = await this.kademlia.findNode(this.localPeerId);
-      
+      console.log(`PEER-DISCOVERY: Starting discovery attempt ${this.discoveryAttempts} (next backoff: ${this.discoveryBackoff}ms)`);
+
+      // ENHANCED: Get peers from multiple sources for better diversity
+      const potentialPeers = this.gatherPotentialPeers();
+
+      console.log(`PEER-DISCOVERY: Found ${potentialPeers.length} potential peers from all sources`);
+
       if (potentialPeers.length === 0) {
-        console.log('PEER-DISCOVERY: Kademlia discovery found no peers');
+        console.log('PEER-DISCOVERY: No potential peers found, attempting Kademlia lookup');
+        // Try a Kademlia lookup to discover new peers
+        await this.performKademliaDiscovery();
         return 0;
       }
-      
-      console.log('PEER-DISCOVERY: Found potential peers via Kademlia:', potentialPeers.map(p => p.id));
 
-      const availablePeers = potentialPeers
-        .filter(contact => 
-          contact.id !== this.localPeerId && 
-          !this.peerManager.getPeers().has(contact.id)
-        )
-        .slice(0, needed); // STABILIZED: Limit to needed peers
+      // ENHANCED: Smart peer selection based on Kademlia distance and connection status
+      const selectedPeers = this.selectOptimalPeers(potentialPeers, currentPeerCount);
 
-      let connected = 0;
-      for (const contact of availablePeers) {
-        if (connected >= needed) break;
-        if (this.peerManager.getPeerCount() >= this.maxPeers) break;
-        
-        console.log(`PEER-DISCOVERY: Attempting connection to Kademlia peer: ${contact.id}`);
-        const success = await this.peerManager.requestConnection(contact.id, true);
-        if (success) {
-          connected++;
-          // STABILIZED: Add delay between connection attempts
+      console.log(`PEER-DISCOVERY: Attempting to connect to ${selectedPeers.length} optimal peers:`, selectedPeers.map(p => p.id));
+
+      // FIXED: Shorter delays for initial connections
+      let successfulConnections = 0;
+      for (const peerInfo of selectedPeers) {
+        try {
+          const connected = await this.peerManager.requestConnection(peerInfo.id, true);
+          if (connected) {
+            console.log(`PEER-DISCOVERY: Successfully initiated connection to ${peerInfo.id}`);
+            successfulConnections++;
+          } else {
+            console.log(`PEER-DISCOVERY: Connection to ${peerInfo.id} was rejected`);
+          }
+          
+          // FIXED: Shorter delay between connection attempts
           await new Promise(resolve => setTimeout(resolve, 500));
+        } catch (error) {
+          console.error(`PEER-DISCOVERY: Failed to connect to ${peerInfo.id}:`, error);
+        }
+      }
+
+      // ENHANCED: Reset backoff on successful connections
+      if (successfulConnections > 0) {
+        console.log(`PEER-DISCOVERY: ${successfulConnections} successful connections, resetting backoff`);
+        this.discoveryAttempts = Math.max(0, this.discoveryAttempts - successfulConnections);
+        this.discoveryBackoff = this.baseDiscoveryDelay;
+      }
+
+      return successfulConnections;
+
+    } finally {
+      this.isDiscovering = false;
+    }
+  }
+
+  /**
+   * ENHANCED: Gather potential peers from multiple sources
+   * @returns {Array} Array of potential peer objects with metadata
+   */
+  gatherPotentialPeers() {
+    const potentialPeers = new Map();
+    const connectedPeers = this.peerManager.getPeers();
+    const pendingConnections = this.peerManager.pendingConnections;
+
+    // Source 1: Kademlia routing table
+    const allContacts = this.kademlia.routingTable.getAllContacts
+      ? this.kademlia.routingTable.getAllContacts()
+      : this.kademlia.routingTable.buckets.flat();
+
+    for (const contact of allContacts) {
+      if (contact.id !== this.localPeerId && 
+          !connectedPeers.has(contact.id) && 
+          !pendingConnections.has(contact.id)) {
+        potentialPeers.set(contact.id, {
+          id: contact.id,
+          source: 'kademlia',
+          lastSeen: contact.lastSeen || 0,
+          failureCount: contact.failureCount || 0,
+          priority: 1
+        });
+      }
+    }
+
+    // Source 2: Reconnection data (alternative peers from previous sessions)
+    const reconnectionData = this.getReconnectionData();
+    for (const peerId of reconnectionData.peers) {
+      if (peerId !== this.localPeerId && 
+          !connectedPeers.has(peerId) && 
+          !pendingConnections.has(peerId) &&
+          !potentialPeers.has(peerId)) {
+        potentialPeers.set(peerId, {
+          id: peerId,
+          source: 'reconnection',
+          lastSeen: reconnectionData.timestamp || 0,
+          failureCount: 0,
+          priority: 0.8
+        });
+      }
+    }
+
+    return Array.from(potentialPeers.values());
+  }
+
+  /**
+   * FIXED: Select optimal peers without BigInt conversion error
+   * @param {Array} potentialPeers - Array of potential peer objects
+   * @param {number} currentPeerCount - Current number of peers
+   * @returns {Array} Array of selected peer objects
+   */
+  selectOptimalPeers(potentialPeers, currentPeerCount) {
+    const maxNewConnections = Math.min(3, this.maxPeers - currentPeerCount); // FIXED: Allow more connections at once
+    
+    // FIXED: Score peers without complex distance calculation to avoid BigInt errors
+    const scoredPeers = potentialPeers.map(peer => {
+      // Use a simple numeric distance instead of BigInt
+      let distance = Math.floor(Math.random() * 1000000);
+      
+      // Score based on multiple factors
+      let score = peer.priority;
+      
+      // Prefer peers with recent activity
+      const timeSinceLastSeen = Date.now() - (peer.lastSeen || 0);
+      if (timeSinceLastSeen < 300000) { // 5 minutes
+        score += 0.3;
+      }
+      
+      // Penalize peers with failures
+      score -= (peer.failureCount || 0) * 0.2;
+      
+      // Prefer Kademlia routing table peers
+      if (peer.source === 'kademlia') {
+        score += 0.2;
+      }
+      
+      return {
+        ...peer,
+        distance,
+        score
+      };
+    });
+
+    // Sort by score (highest first), then by distance (closest first)
+    scoredPeers.sort((a, b) => {
+      if (Math.abs(a.score - b.score) > 0.1) {
+        return b.score - a.score; // Higher score first
+      }
+      return a.distance - b.distance; // Closer distance first (numeric comparison)
+    });
+
+    return scoredPeers.slice(0, maxNewConnections);
+  }
+
+  /**
+   * ENHANCED: Perform Kademlia discovery to find new peers
+   */
+  async performKademliaDiscovery() {
+    try {
+      console.log('PEER-DISCOVERY: Performing Kademlia discovery for new peers');
+      
+      // Perform a FIND_NODE for a random ID to discover new peers
+      const randomId = this.generateRandomKademliaId();
+      const discoveredPeers = await this.kademlia.findNode(randomId);
+      
+      console.log(`PEER-DISCOVERY: Kademlia discovery found ${discoveredPeers.length} peers`);
+      
+      // Try to connect to some of the discovered peers
+      const connectablePeers = discoveredPeers
+        .filter(peer => 
+          peer.id !== this.localPeerId && 
+          !this.peerManager.getPeers().has(peer.id) &&
+          !this.peerManager.pendingConnections.has(peer.id)
+        )
+        .slice(0, 2);
+      
+      for (const peer of connectablePeers) {
+        try {
+          await this.peerManager.requestConnection(peer.id, true);
+          console.log(`PEER-DISCOVERY: Initiated connection to discovered peer ${peer.id}`);
+          await new Promise(resolve => setTimeout(resolve, 500));
+        } catch (error) {
+          console.error(`PEER-DISCOVERY: Failed to connect to discovered peer ${peer.id}:`, error);
         }
       }
       
-      return connected;
     } catch (error) {
       console.error('PEER-DISCOVERY: Kademlia discovery failed:', error);
-      return 0;
     }
   }
 
   /**
-   * STABILIZED: Reset backoff when new peers join the network
+   * Generate a random Kademlia ID for discovery
+   * @returns {string} Random Kademlia ID
+   */
+  generateRandomKademliaId() {
+    let id = '';
+    for (let i = 0; i < 40; i++) { // 160 bits / 4 bits per hex char
+      id += Math.floor(Math.random() * 16).toString(16);
+    }
+    return id;
+  }
+
+  /**
+   * FIXED: Reset backoff when new peers join the network
    */
   onPeerConnected() {
     // Reset discovery backoff when a peer connects
@@ -388,89 +464,36 @@ export class PeerDiscovery {
 
   /**
    * Attempts peer-assisted reconnection using stored peer data
-   * @param {Object} transportInstance - Transport instance for connections
-   * @returns {Promise<boolean>} True if reconnection was attempted via peers
+   * @param {Object} transportInstance - Transport instance for signaling
+   * @returns {boolean} True if reconnection was attempted via peers
    */
   async attemptPeerAssistedReconnection(transportInstance) {
-    // Check if we have recent reconnection data from previous sessions (within 10 minutes)
-    const hasRecentReconnectionData = this._reconnectionPeers && 
-                                   this._reconnectionPeers.length > 0 && 
-                                   (Date.now() - this._reconnectionDataTimestamp < 10 * 60 * 1000);
+    const reconnectionData = this.getReconnectionData();
+    const availablePeers = reconnectionData.peers.filter(peerId => peerId !== this.localPeerId);
     
-    // Check for alternative peers collected from peer evictions
-    const hasAlternativePeers = this._alternativePeers && this._alternativePeers.length > 0;
-    
-    // Check for known peers from routing table
-    const knownPeersFromRouting = this.kademlia.routingTable.getAllContacts ? this.kademlia.routingTable.getAllContacts() : [];
-    const hasKnownPeers = knownPeersFromRouting.length > 0;
-    
-    // Create a combined list of potential peers for connection attempts
-    let potentialPeers = [];
-    
-    if (hasRecentReconnectionData) {
-      potentialPeers = [...this._reconnectionPeers];
-    }
-    
-    if (hasAlternativePeers) {
-      this._alternativePeers.forEach(peerId => {
-        if (!potentialPeers.includes(peerId)) {
-          potentialPeers.push(peerId);
-        }
-      });
-    }
-    
-    if (hasKnownPeers) {
-      knownPeersFromRouting.forEach(contact => {
-        if (!potentialPeers.includes(contact.id)) {
-          potentialPeers.push(contact.id);
-        }
-      });
-    }
-    
-    if (potentialPeers.length === 0) {
-      console.log('PEER-DISCOVERY: No peers available for assisted reconnection');
+    if (availablePeers.length === 0) {
+      console.log('PEER-DISCOVERY: No reconnection data available');
       return false;
     }
 
-    console.log(`PEER-DISCOVERY: Attempting peer-based connection with ${potentialPeers.length} potential peers...`);
-    
-    // Connect transport if needed
-    if (!transportInstance.isConnected) {
-      try {
-        await transportInstance.connect(this.localPeerId, {silentConnect: true});
-      } catch (error) {
-        console.warn('PEER-DISCOVERY: Failed to connect transport silently:', error);
-      }
-    }
+    console.log(`PEER-DISCOVERY: Attempting peer-assisted reconnection with ${availablePeers.length} stored peers...`);
     
     let reconnectedViaPeers = false;
     
-    // STABILIZED: Try connecting to fewer peers with delays
-    const peersToTry = potentialPeers.slice(0, Math.min(3, this.maxPeers)); // Max 3 peers
-    
-    for (const alternatePeerId of peersToTry) {
-      if (this.peerManager.getPeerCount() >= this.maxPeers) break;
-      
+    // Try to connect to stored peers directly
+    for (const peerId of availablePeers.slice(0, Math.min(3, this.maxPeers))) {
       try {
-        console.log(`PEER-DISCOVERY: Trying peer-assisted connection to ${alternatePeerId}...`);
-        const connectionAllowed = await this.peerManager.requestConnection(alternatePeerId, true);
-        
-        if (connectionAllowed) {
-          // Wait to see if connection establishes
-          await new Promise(resolve => setTimeout(resolve, 3000));
+        console.log(`PEER-DISCOVERY: Attempting direct reconnection to ${peerId}`);
+        const connected = await this.peerManager.requestConnection(peerId, true);
+        if (connected) {
+          console.log(`PEER-DISCOVERY: Successfully reconnected to ${peerId}`);
+          reconnectedViaPeers = true;
           
-          const peers = this.peerManager.getPeers();
-          if (peers.has(alternatePeerId) && peers.get(alternatePeerId).connected) {
-            console.log(`PEER-DISCOVERY: Successfully connected to peer ${alternatePeerId}!`);
-            reconnectedViaPeers = true;
-          }
+          // Add a small delay between connections
+          await new Promise(resolve => setTimeout(resolve, 500));
         }
-        
-        // STABILIZED: Add delay between attempts
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        
       } catch (error) {
-        console.error(`PEER-DISCOVERY: Failed to connect via peer ${alternatePeerId}:`, error);
+        console.error(`PEER-DISCOVERY: Failed to reconnect to ${peerId}:`, error);
       }
     }
 
@@ -534,7 +557,7 @@ export class PeerDiscovery {
   }
 
   /**
-   * STABILIZED: Cleanup method to stop discovery
+   * FIXED: Cleanup method to stop discovery
    */
   destroy() {
     if (this.discoveryTimeout) {

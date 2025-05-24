@@ -108,6 +108,14 @@ export class PeerManager {
   }
 
   /**
+   * Gets the count of connected peers (alias for getPeerCount)
+   * @returns {number} Number of connected peers
+   */
+  getConnectedPeerCount() {
+    return this.getPeerCount();
+  }
+
+  /**
    * Gets an array of connected peer IDs
    * @returns {Array<string>} Array of connected peer IDs
    */

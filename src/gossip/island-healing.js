@@ -160,4 +160,28 @@ export class IslandHealingManager {
       console.log(`Gossip: Removed ${peerId} from bridge peers`);
     }
   }
+
+  /**
+   * ENHANCED: Report delivery failures for potential healing
+   * @param {string} messageId - ID of the message that failed to deliver
+   * @param {Array} failedPeers - Array of peer IDs that failed to receive the message
+   */
+  reportDeliveryFailures(messageId, failedPeers) {
+    console.log(`Gossip: Delivery failures reported for message ${messageId}: ${failedPeers.join(', ')}`);
+    
+    // Remove failed peers from bridge peers if they're consistently failing
+    for (const peerId of failedPeers) {
+      if (this.bridgePeers.has(peerId)) {
+        console.log(`Gossip: Removing unreliable bridge peer ${peerId} due to delivery failure`);
+        this.bridgePeers.delete(peerId);
+      }
+    }
+    
+    // Try to send connectivity probes to failed peers to check if they're still reachable
+    for (const peerId of failedPeers) {
+      setTimeout(() => {
+        this.sendConnectivityProbe(peerId);
+      }, 2000); // Delay probe to avoid overwhelming the network
+    }
+  }
 }

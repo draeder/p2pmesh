@@ -134,10 +134,17 @@ export class ConnectionManager {
   }
 
   /**
-   * STABILIZED: Check if we can reconnect to a peer (respects backoff)
+   * FIXED: More permissive reconnection check - allow initial connections
    */
   canReconnectToPeer(peerId) {
     const attempts = this.reconnectionAttempts.get(peerId) || 0;
+    
+    // FIXED: Always allow first connection attempt
+    if (attempts === 0) {
+      return true;
+    }
+    
+    // Only apply limits after first failure
     if (attempts >= this.maxReconnectionAttempts) {
       return false;
     }
@@ -191,7 +198,7 @@ export class ConnectionManager {
   }
 
   /**
-   * FIXED: Smart connection requests with eviction for better connectivity
+   * FIXED: Smart connection requests with Kademlia-aware eviction and stability
    */
   async requestConnection(remotePeerId, initiator = true) {
     if (this.peers.has(remotePeerId) || this.pendingConnections.has(remotePeerId)) {
@@ -209,7 +216,14 @@ export class ConnectionManager {
     const pendingPeerCount = this.pendingConnections.size;
     const totalPeerCount = connectedPeerCount + pendingPeerCount;
 
-    console.log(`Connection request from ${remotePeerId}: Connected=${connectedPeerCount}, Pending=${pendingPeerCount}, Total=${totalPeerCount}, Max=${this.maxPeers}`);
+    console.log(`STABILITY: Connection request from ${remotePeerId}: Connected=${connectedPeerCount}, Pending=${pendingPeerCount}, Total=${totalPeerCount}, Max=${this.maxPeers}`);
+
+    // ENHANCED: Always allow connections if we're significantly under-connected
+    if (connectedPeerCount < this.minPeers) {
+      console.log(`STABILITY: Under minimum connectivity (${connectedPeerCount}/${this.minPeers}), allowing connection to ${remotePeerId}`);
+      await this.connectToPeer(remotePeerId, initiator);
+      return true;
+    }
 
     // STABILIZED: Allow connections if we're under maxPeers
     if (totalPeerCount < this.maxPeers) {
@@ -218,10 +232,10 @@ export class ConnectionManager {
       return true;
     }
 
-    // FIXED: Enable smart eviction for better connectivity even in small networks
-    const evicted = this.evictForBetterConnectivity(remotePeerId);
+    // ENHANCED: Kademlia-aware eviction for better network topology
+    const evicted = this.evictForKademliaOptimization(remotePeerId);
     if (evicted) {
-      console.log(`STABILITY: Evicted peer to make room for better connectivity with ${remotePeerId}`);
+      console.log(`STABILITY: Evicted peer for Kademlia optimization with ${remotePeerId}`);
       await this.connectToPeer(remotePeerId, initiator);
       return true;
     }
@@ -231,7 +245,98 @@ export class ConnectionManager {
   }
 
   /**
-   * Attempts to connect to a new peer
+   * ENHANCED: Kademlia-aware eviction for optimal network topology
+   * @param {string} newPeerId - ID of the new peer to connect to
+   * @returns {boolean} True if eviction occurred
+   */
+  evictForKademliaOptimization(newPeerId) {
+    try {
+      const connectedCount = this.getConnectedPeerCount();
+      
+      // Only evict if we're at maxPeers
+      if (connectedCount < this.maxPeers) {
+        console.log(`STABILITY: Not at maxPeers (${connectedCount}/${this.maxPeers}), no eviction needed`);
+        return false;
+      }
+      
+      // ENHANCED: Use Kademlia routing table to make smart eviction decisions
+      const distanceToNewPeer = calculateDistance(this.localPeerId, newPeerId);
+      
+      // Get all connected peers and their Kademlia distances
+      const connectedPeersWithDistances = [];
+      this.peers.forEach((peer, peerId) => {
+        if (peer.connected) {
+          const distance = calculateDistance(this.localPeerId, peerId);
+          connectedPeersWithDistances.push({
+            peerId,
+            distance,
+            peer,
+            inKademliaTable: this.kademlia.routingTable.getAllContacts().some(c => c.id === peerId)
+          });
+        }
+      });
+      
+      // Sort by distance (furthest first)
+      connectedPeersWithDistances.sort((a, b) => a.distance > b.distance ? -1 : 1);
+      
+      console.log(`STABILITY: Evaluating ${connectedPeersWithDistances.length} connected peers for eviction`);
+      
+      // ENHANCED: Prefer to evict peers that are:
+      // 1. Not in Kademlia routing table (less important for DHT)
+      // 2. Furthest away
+      // 3. Have connection issues
+      
+      let candidateForEviction = null;
+      
+      // First, try to find a peer not in Kademlia table that's further than new peer
+      for (const peerInfo of connectedPeersWithDistances) {
+        if (!peerInfo.inKademliaTable && peerInfo.distance > distanceToNewPeer) {
+          candidateForEviction = peerInfo;
+          console.log(`STABILITY: Found non-Kademlia peer ${peerInfo.peerId} for eviction (distance: ${peerInfo.distance})`);
+          break;
+        }
+      }
+      
+      // If no non-Kademlia peer found, try furthest peer that's further than new peer
+      if (!candidateForEviction) {
+        for (const peerInfo of connectedPeersWithDistances) {
+          if (peerInfo.distance > distanceToNewPeer) {
+            candidateForEviction = peerInfo;
+            console.log(`STABILITY: Found furthest peer ${peerInfo.peerId} for eviction (distance: ${peerInfo.distance})`);
+            break;
+          }
+        }
+      }
+      
+      // If still no candidate, check for stalled connections
+      if (!candidateForEviction) {
+        const stalledPeerId = this.findStalledConnection();
+        if (stalledPeerId) {
+          const stalledPeerInfo = connectedPeersWithDistances.find(p => p.peerId === stalledPeerId);
+          if (stalledPeerInfo) {
+            candidateForEviction = stalledPeerInfo;
+            console.log(`STABILITY: Found stalled connection ${stalledPeerId} for eviction`);
+          }
+        }
+      }
+      
+      if (candidateForEviction) {
+        console.log(`STABILITY: Evicting peer ${candidateForEviction.peerId} (distance: ${candidateForEviction.distance}, inKademlia: ${candidateForEviction.inKademliaTable}) for closer peer ${newPeerId} (distance: ${distanceToNewPeer})`);
+        this.forceDisconnectPeer(candidateForEviction.peerId);
+        return true;
+      }
+      
+      console.log(`STABILITY: New peer ${newPeerId} (distance: ${distanceToNewPeer}) not closer than any connected peer, no eviction`);
+      return false;
+      
+    } catch (error) {
+      console.error(`STABILITY: Error in evictForKademliaOptimization for ${newPeerId}:`, error);
+      return false;
+    }
+  }
+
+  /**
+   * FIXED: Attempts to connect to a new peer with connection state validation
    */
   async connectToPeer(remotePeerId, initiator = true) {
     if (this.peers.has(remotePeerId) || this.pendingConnections.has(remotePeerId)) {
@@ -243,10 +348,25 @@ export class ConnectionManager {
 
     try {
       const Peer = await loadSimplePeer();
-      const newPeer = new Peer({ initiator, trickle: false, iceServers: this.iceServers });
+      // FIXED: Add connection state tracking and timeout handling
+      const newPeer = new Peer({ 
+        initiator, 
+        trickle: false, 
+        iceServers: this.iceServers,
+        config: {
+          iceTransportPolicy: 'all',
+          bundlePolicy: 'balanced',
+          rtcpMuxPolicy: 'require'
+        }
+      });
+      
+      // FIXED: Add connection state validation
+      newPeer._connectionState = 'connecting';
+      newPeer._lastStateChange = Date.now();
+      
       this.setupPeerEvents(newPeer, remotePeerId);
       this.peers.set(remotePeerId, newPeer);
-      console.log(`Initiated connection to ${remotePeerId} (initiator: ${initiator})`);
+      console.log(`FIXED: Initiated connection to ${remotePeerId} (initiator: ${initiator}) with state tracking`);
     } catch (error) {
       console.error(`Failed to create peer connection to ${remotePeerId}:`, error);
       this.pendingConnections.delete(remotePeerId);

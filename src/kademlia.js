@@ -49,7 +49,7 @@ class RoutingTable {
   }
 
   /**
-   * Adds a contact (peer) to the appropriate k-bucket.
+   * FIXED: Adds a contact with stable eviction and connection status checking
    * @param {object} contact - Contact info { id: string, address: any, ... }
    */
   addContact(contact) {
@@ -62,19 +62,107 @@ class RoutingTable {
     const existingContactIndex = bucket.findIndex(c => c.id === contact.id);
 
     if (existingContactIndex !== -1) {
-      // Contact already exists, move to the end (most recently seen)
+      // Contact already exists, update timestamp and move to end (most recently seen)
       const existingContact = bucket.splice(existingContactIndex, 1)[0];
+      existingContact.lastSeen = Date.now();
+      existingContact.address = contact.address; // Update address if changed
       bucket.push(existingContact);
+      console.log(`Kademlia: Updated existing contact ${contact.id} in bucket ${bucketIndex}`);
     } else {
+      // Add timestamp to new contact
+      const newContact = {
+        ...contact,
+        lastSeen: Date.now(),
+        failureCount: 0
+      };
+      
       if (bucket.length < K) {
-        bucket.push(contact);
+        bucket.push(newContact);
+        console.log(`Kademlia: Added new contact ${contact.id} to bucket ${bucketIndex} (${bucket.length}/${K})`);
       } else {
-        // Bucket is full, try to ping the least recently seen contact (head of the list)
-        // If it doesn't respond, remove it and add the new one.
-        // This part requires RPC (PING) and is simplified here.
-        console.log(`Bucket ${bucketIndex} is full. Eviction logic needed for contact ${contact.id}.`);
-        // For now, we'll just drop the new contact if the bucket is full
-        // In a real implementation: ping bucket[0], if no response, remove bucket[0] and add contact
+        // FIXED: Stable bucket management - check connection status before eviction
+        console.log(`Kademlia: Bucket ${bucketIndex} is full (${bucket.length}/${K}), evaluating eviction for ${contact.id}`);
+        
+        // Find the least recently seen contact that's not currently connected
+        let candidateForEviction = null;
+        let oldestTime = Date.now();
+        
+        for (const existingContact of bucket) {
+          // Check if this contact is currently connected via WebRTC
+          const isConnected = this.isContactConnected(existingContact.id);
+          
+          if (!isConnected && existingContact.lastSeen < oldestTime) {
+            oldestTime = existingContact.lastSeen;
+            candidateForEviction = existingContact;
+          }
+        }
+        
+        if (candidateForEviction) {
+          // Remove the disconnected, oldest contact
+          const evictIndex = bucket.indexOf(candidateForEviction);
+          bucket.splice(evictIndex, 1);
+          bucket.push(newContact);
+          console.log(`Kademlia: Evicted disconnected contact ${candidateForEviction.id} for ${contact.id} in bucket ${bucketIndex}`);
+        } else {
+          // All contacts are connected, check failure counts
+          let highestFailureContact = null;
+          let highestFailures = -1;
+          
+          for (const existingContact of bucket) {
+            if ((existingContact.failureCount || 0) > highestFailures) {
+              highestFailures = existingContact.failureCount || 0;
+              highestFailureContact = existingContact;
+            }
+          }
+          
+          if (highestFailureContact && highestFailures > 2) {
+            // Evict contact with highest failure count
+            const evictIndex = bucket.indexOf(highestFailureContact);
+            bucket.splice(evictIndex, 1);
+            bucket.push(newContact);
+            console.log(`Kademlia: Evicted unreliable contact ${highestFailureContact.id} (${highestFailures} failures) for ${contact.id}`);
+          } else {
+            // All contacts are good, don't add the new one
+            console.log(`Kademlia: Bucket ${bucketIndex} full with good contacts, not adding ${contact.id}`);
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * FIXED: Check if a contact is currently connected via WebRTC
+   * @param {string} contactId - Contact ID to check
+   * @returns {boolean} True if connected
+   */
+  isContactConnected(contactId) {
+    // This will be set by the DHT instance when peer manager is available
+    if (this.dht && this.dht.peerManager) {
+      const peers = this.dht.peerManager.getPeers();
+      const peer = peers.get(contactId);
+      return peer && peer.connected;
+    }
+    return false;
+  }
+
+  /**
+   * FIXED: Mark a contact as failed (for RPC timeouts, etc.)
+   * @param {string} contactId - Contact ID that failed
+   */
+  markContactFailed(contactId) {
+    for (const bucket of this.buckets) {
+      const contact = bucket.find(c => c.id === contactId);
+      if (contact) {
+        contact.failureCount = (contact.failureCount || 0) + 1;
+        contact.lastFailure = Date.now();
+        console.log(`Kademlia: Marked contact ${contactId} as failed (${contact.failureCount} failures)`);
+        
+        // Remove contact if it has too many failures and isn't connected
+        if (contact.failureCount > 5 && !this.isContactConnected(contactId)) {
+          this.removeContact(contactId);
+          console.log(`Kademlia: Removed unreliable contact ${contactId} after ${contact.failureCount} failures`);
+        }
+        break;
       }
     }
   }

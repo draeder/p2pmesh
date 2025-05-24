@@ -20,7 +20,7 @@ export class EventManager {
   }
 
   /**
-   * Sets up event handlers for a peer connection
+   * FIXED: Sets up event handlers for a peer connection with permissive signaling
    * @param {Object} peer - SimplePeer instance
    * @param {string} remotePeerId - Remote peer ID
    */
@@ -28,8 +28,23 @@ export class EventManager {
     // Track connection attempt start time
     this.peerConnectionAttempts.set(remotePeerId, Date.now());
     
+    // FIXED: Add connection state tracking
+    peer._connectionState = 'connecting';
+    peer._lastStateChange = Date.now();
+    peer._signalQueue = [];
+    peer._isProcessingSignal = false;
+    
     peer.on('signal', async (data) => {
-      console.log(`Preparing WebRTC signal to ${remotePeerId}`);
+      console.log(`Preparing WebRTC signal to ${remotePeerId} (type: ${data.type || 'candidate'}, state: ${peer._pc?.signalingState || 'unknown'})`);
+      
+      // Only check if peer is destroyed - allow all other signals through
+      if (peer.destroyed) {
+        console.log(`Ignoring signal for destroyed peer ${remotePeerId}`);
+        return;
+      }
+      
+      // FIXED: Removed restrictive signal validation that was preventing connections
+      // Let SimplePeer handle signal validation internally
       
       // Use SignalingOptimizer to choose the best signaling path
       try {
@@ -48,6 +63,11 @@ export class EventManager {
 
     peer.on('connect', () => {
       console.log(`Connected (WebRTC) to peer: ${remotePeerId}`);
+      
+      // FIXED: Update connection state
+      peer._connectionState = 'connected';
+      peer._lastStateChange = Date.now();
+      
       // Connection established, clear connection attempt tracking
       this.peerConnectionAttempts.delete(remotePeerId);
       this.pendingConnections.delete(remotePeerId);
@@ -104,6 +124,11 @@ export class EventManager {
     peer.on('error', (err) => {
       console.error(`Error with peer ${remotePeerId}:`, err);
       
+      // FIXED: Mark contact as failed in Kademlia for better routing decisions
+      if (this.kademlia && this.kademlia.routingTable && this.kademlia.routingTable.markContactFailed) {
+        this.kademlia.routingTable.markContactFailed(remotePeerId);
+      }
+      
       // Notify connection manager about disconnection for reconnection logic
       if (this.connectionManager && this.connectionManager.onPeerDisconnected) {
         this.connectionManager.onPeerDisconnected(remotePeerId);
@@ -154,6 +179,11 @@ export class EventManager {
       if (peer) {
         console.log(`Destroying timed out peer connection to ${peerId}`);
         peer.destroy();
+        
+        // FIXED: Mark contact as failed in Kademlia
+        if (this.kademlia && this.kademlia.routingTable && this.kademlia.routingTable.markContactFailed) {
+          this.kademlia.routingTable.markContactFailed(peerId);
+        }
         
         // Notify connection manager about timeout for reconnection logic
         if (this.connectionManager && this.connectionManager.onPeerDisconnected) {
