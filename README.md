@@ -302,6 +302,167 @@ The protocol implements a sophisticated acknowledgment and retry system:
 
 Applications can subscribe to specific message topics with custom handler functions, creating a flexible pub/sub system across the mesh network.
 
+## Network Architecture Diagrams
+
+### 1. Peer Connection Management
+
+```mermaid
+flowchart TD
+    A[New Peer Joins] --> B{Under maxPeers?}
+    
+    B --> C[Accept Connection]
+    B --> D[Check Eviction]
+    
+    D --> E[Calculate Distance]
+    E --> F{New Peer Closer?}
+    
+    F --> G[Evict Furthest]
+    F --> H[Reject Connection]
+    
+    G --> I[Send Reconnection Data]
+    I --> C
+    
+    C --> J[Establish WebRTC]
+    J --> K[Add to DHT]
+```
+
+### 2. Connection Monitoring
+
+```mermaid
+flowchart TD
+    A[Monitor Health] --> B{Below minPeers?}
+    
+    B --> C[Continue Monitor]
+    B --> D[Trigger Reconnect]
+    
+    D --> E[Get Available Peers]
+    E --> F[Sort by Distance]
+    F --> G[Connect to Closest]
+    
+    G --> H{Success?}
+    H --> I[Update Table]
+    H --> J[Try Next Peer]
+    
+    I --> A
+    J --> G
+    C --> A
+```
+
+### 3. Kademlia DHT Structure
+
+```mermaid
+flowchart TD
+    A[Local Peer ID] --> B[K-Buckets Array]
+    
+    B --> C[Bucket 0]
+    B --> D[Bucket 1]
+    B --> E[Bucket 2]
+    B --> F[...]
+    B --> G[Bucket 159]
+    
+    H[Each Bucket] --> I[Up to K contacts]
+    I --> J[Sorted by last seen]
+```
+
+### 4. DHT Operations
+
+```mermaid
+flowchart TD
+    subgraph FIND_NODE
+        A[FIND_NODE] --> B[Query closest nodes]
+        B --> C[Receive contacts]
+        C --> D{Found closer?}
+        D --> B
+        D --> E[Return closest]
+    end
+    
+    subgraph STORE
+        F[STORE] --> G[Find closest to key]
+        G --> H[Send STORE RPC]
+    end
+    
+    subgraph FIND_VALUE
+        I[FIND_VALUE] --> J{In local storage?}
+        J --> K[Return value]
+        J --> L[Query network]
+        L --> M[Return result]
+    end
+```
+
+### 5. Gossip Broadcasting
+
+```mermaid
+flowchart TD
+    A[Create Message] --> B[Sign Message]
+    B --> C[Add to Cache]
+    C --> D[Check Network Size]
+    
+    D --> E{Network Size?}
+    E --> F[100% Fanout]
+    E --> G[Smart Selection]
+    E --> H[Optimized Selection]
+    
+    F --> I[Send to Peers]
+    G --> I
+    H --> I
+    
+    I --> J[Track Propagation]
+```
+
+### 6. Gossip Reception
+
+```mermaid
+flowchart TD
+    A[Receive Message] --> B[Update Reachability]
+    B --> C{Already seen?}
+    
+    C --> D[Drop Message]
+    C --> E[Verify Signature]
+    
+    E --> D
+    E --> F[Add to Cache]
+    
+    F --> G[Process Locally]
+    G --> H[Select Relay Peers]
+    H --> I[Continue Propagation]
+```
+
+### 7. Island Detection
+
+```mermaid
+flowchart TD
+    A[Monitor Connectivity] --> B[Track Reachability]
+    B --> C{Unreachable peers?}
+    
+    C --> D[Normal Operation]
+    C --> E[Analyze Patterns]
+    
+    E --> F[Identify Bridges]
+    F --> G[Mark Bridge Peers]
+    G --> H[Prioritize in Fanout]
+    H --> I[Enhanced Connectivity]
+    
+    D --> A
+    I --> A
+```
+
+### 8. Direct Messaging
+
+```mermaid
+flowchart TD
+    A[Send Message] --> B{Direct connection?}
+    
+    B --> C[Send Directly]
+    B --> D[Route via DHT]
+    
+    D --> E[Find Closest Peers]
+    E --> F[Send via Relay]
+    F --> G[Forward to Target]
+    
+    C --> H[Delivered]
+    G --> H
+```
+
 ## Kademlia DHT Implementation
 
 P2PMesh uses a Kademlia Distributed Hash Table (DHT) for efficient peer discovery and message routing:
