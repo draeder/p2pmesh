@@ -130,6 +130,15 @@ export class P2PMesh {
           // await this.peerDiscovery.findAndConnectPeers(); // Be cautious of calling this too often or in loops
         }
       });
+
+      // Listen for batched signals from SignalingOptimizer
+      this.transportInstance.on('batched_signals', ({ from, signals, batchTimestamp }) => {
+        console.log(`P2PMesh: Received batched signals from ${from} (${signals.length} signals)`);
+        // Process each signal in the batch
+        signals.forEach(signal => {
+          this.handleIncomingSignal(from, signal);
+        });
+      });
     } else {
       console.warn('P2PMesh: Transport does not support .on method for Kademlia RPC messages or bootstrap_peers.');
     }

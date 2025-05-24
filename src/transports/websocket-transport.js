@@ -85,6 +85,16 @@ export class WebSocketTransport extends AbstractTransport {
                 this.emit('ack', { from: message.from });
               }
               break;
+            case 'batched_signals': // Batched signals from SignalingOptimizer
+              if (message.from && message.signals && Array.isArray(message.signals)) {
+                console.log(`WebSocketTransport: Received batched signals from ${message.from} (${message.signals.length} signals)`);
+                this.emit('batched_signals', { 
+                  from: message.from, 
+                  signals: message.signals,
+                  batchTimestamp: message.batchTimestamp 
+                });
+              }
+              break;
             case 'bootstrap_peers': // List of peers from signaling server for Kademlia bootstrap
               if (message.peers) {
                 console.log(`WebSocketTransport: Received bootstrap_peers:`, message.peers);

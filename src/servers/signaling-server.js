@@ -91,6 +91,25 @@ wss.on('connection', (ws) => {
         }
         break;
 
+      // Handle batched signals from SignalingOptimizer
+      case 'batched_signals':
+        if (parsedMessage.to && peers.has(parsedMessage.to)) {
+          const recipientWs = peers.get(parsedMessage.to);
+          if (recipientWs && recipientWs.readyState === WebSocket.OPEN) {
+            const messageToSend = { ...parsedMessage, from: currentPeerId };
+            recipientWs.send(JSON.stringify(messageToSend));
+            console.log(`Relayed batched signals from ${currentPeerId} to ${parsedMessage.to} (${parsedMessage.signals ? parsedMessage.signals.length : 0} signals)`);
+          } else {
+            console.warn(`Recipient ${parsedMessage.to} is not open for batched signals. Removing.`);
+            peers.delete(parsedMessage.to);
+            notifyPeerLeft(parsedMessage.to);
+          }
+        } else if (parsedMessage.to) {
+          console.warn(`Recipient ${parsedMessage.to} not found for batched signals.`);
+          ws.send(JSON.stringify({ type: 'error', message: `Peer ${parsedMessage.to} not found for batched signals.`}));
+        }
+        break;
+
       // Relay messages to a specific peer or broadcast
       // Assumes messages have a 'to' field for direct, or are broadcast if 'to' is missing
       // Or specific types like 'signal', 'offer', 'answer', 'candidate'

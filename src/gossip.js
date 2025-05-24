@@ -44,8 +44,8 @@ class GossipMessage {
       this.maxHops = 10;
       this.cacheTTL = 5 * 60 * 1000;
       this.pendingAcknowledgments = new Map();
-      this.messageRetryInterval = 1500;
-      this.maxRetryAttempts = 6;
+      this.messageRetryInterval = 2000;
+      this.maxRetryAttempts = 3; // Reduced from 6 to 3
   
       console.log(`GossipProtocol initialized for peer ${localPeerId}`);
     }
@@ -97,8 +97,11 @@ class GossipMessage {
         : this.dht.routingTable.buckets.flat();
       const peerIds = allContacts.map(c => c.id).filter(id => id !== this.localPeerId);
   
-      // Track ack for reliability
-      this._trackMessageDelivery(msg.id, peerIds);
+      // Only track acknowledgments for direct broadcasts from origin peer
+      // Don't track for relayed messages to avoid unnecessary retries
+      if (peerIds.length > 0) {
+        this._trackMessageDelivery(msg.id, peerIds, true); // true = is broadcast
+      }
   
       // Send to everyone
       for (const peerId of peerIds) {
@@ -127,7 +130,7 @@ class GossipMessage {
         return this.broadcast(message.topic, message.payload);
       }
   
-      // Otherwise gossip via fanout
+      // Otherwise gossip via fanout - NO RETRY TRACKING for relayed messages
       const peersToNotify = this._selectPeersForGossip(
         message.topic,
         message.originPeerId,
@@ -186,21 +189,24 @@ class GossipMessage {
       msg.relayedBy = new Set(md.relayedBy || []);
       msg.relayedBy.add(fromPeerId);
   
-      // Ack
-      this._sendAcknowledgment(msg.id, fromPeerId);
+      // Send acknowledgment only for direct broadcasts (hops = 1)
+      // Don't ack relayed messages to reduce network overhead
+      if (msg.hops === 1) {
+        this._sendAcknowledgment(msg.id, fromPeerId);
+      }
   
       // Dedupe & TTL/hops check
       if (this.seenMessages.has(msg.id) || msg.hops > this.maxHops) return;
       const valid = await this._verify(msg.payload, msg.signature, msg.originPeerId);
       if (!valid) return console.warn(`Gossip: Dropped invalid ${msg.id}`);
   
-      this.seenMessages.set(msg.id, msg); // Store complete message object for reliable retries
+      this.seenMessages.set(msg.id, msg); // Store complete message object
       console.log(`Gossip: Received ${msg.id} from ${fromPeerId} (hops=${msg.hops})`);
   
       // Local deliver
       this._processLocal(msg);
   
-      // Continue gossip relay
+      // Continue gossip relay - NO RETRY TRACKING for relayed messages
       const peersToNotify = this._selectPeersForGossip(
         msg.topic,
         msg.originPeerId,
@@ -370,16 +376,26 @@ class GossipMessage {
       const tr = this.pendingAcknowledgments.get(messageId);
       if (!tr) return;
       tr.acknowledged.add(fromPeer);
-      const allAck = tr.expected.every(id => tr.acknowledged.has(id) || id === this.localPeerId);
-      if (allAck) {
+      
+      // Check if we have enough acknowledgments (not necessarily all)
+      const ackRatio = tr.acknowledged.size / tr.expected.length;
+      const isComplete = ackRatio >= 0.8 || tr.acknowledged.size >= Math.min(tr.expected.length, 5);
+      
+      if (isComplete) {
         clearTimeout(tr.timerId);
         this.pendingAcknowledgments.delete(messageId);
-        console.log(`Gossip: All peers ACK’d ${messageId}`);
+        console.log(`Gossip: Sufficient ACKs received for ${messageId} (${tr.acknowledged.size}/${tr.expected.length})`);
       }
     }
   
-    _trackMessageDelivery(messageId, expectedPeers) {
+    _trackMessageDelivery(messageId, expectedPeers, isBroadcast = false) {
       if (this.pendingAcknowledgments.has(messageId)) return;
+      
+      // Only track delivery for direct broadcasts, not relayed messages
+      if (!isBroadcast) {
+        console.log(`Gossip: Skipping delivery tracking for relayed message ${messageId}`);
+        return;
+      }
       
       // Get original message for retry mechanism
       const originalMessage = this.seenMessages.get(messageId);
@@ -394,7 +410,8 @@ class GossipMessage {
         timestamp: Date.now(),
         retryCount: 0,
         timerId: null,
-        originalMessage // Store original message for reliable retries
+        originalMessage, // Store original message for reliable retries
+        isBroadcast
       };
       tr.timerId = setTimeout(() => this._retryMessageDelivery(messageId), this.messageRetryInterval);
       this.pendingAcknowledgments.set(messageId, tr);
@@ -404,30 +421,50 @@ class GossipMessage {
     _retryMessageDelivery(messageId) {
       const tr = this.pendingAcknowledgments.get(messageId);
       if (!tr) return;
+      
       tr.retryCount++;
-      const maxAtt = this.maxRetryAttempts + (tr.expected.length <= 8 ? 2 : 0);
-      if (tr.retryCount > maxAtt) {
+      
+      // More aggressive retry limits
+      const maxAttempts = tr.expected.length <= 3 ? 2 : this.maxRetryAttempts;
+      
+      if (tr.retryCount > maxAttempts) {
         clearTimeout(tr.timerId);
         this.pendingAcknowledgments.delete(messageId);
-        return console.warn(`Gossip: Gave up on ${messageId} after ${tr.retryCount} retries`);
+        console.log(`Gossip: Gave up on ${messageId} after ${tr.retryCount} retries`);
+        return;
       }
+      
       const unacked = tr.expected.filter(id => !tr.acknowledged.has(id) && id !== this.localPeerId);
       if (!unacked.length) {
         clearTimeout(tr.timerId);
         this.pendingAcknowledgments.delete(messageId);
         return;
       }
+      
+      // Check if we have sufficient acknowledgments even without all peers
+      const ackRatio = tr.acknowledged.size / tr.expected.length;
+      if (ackRatio >= 0.7 && tr.acknowledged.size >= 2) {
+        clearTimeout(tr.timerId);
+        this.pendingAcknowledgments.delete(messageId);
+        console.log(`Gossip: Sufficient coverage achieved for ${messageId}, stopping retries`);
+        return;
+      }
+      
       // Retrieve the original message
       const original = tr.originalMessage || this.seenMessages.get(messageId);
       if (!original) {
         console.warn(`Gossip: Cannot retry ${messageId}, original message not found`);
+        clearTimeout(tr.timerId);
+        this.pendingAcknowledgments.delete(messageId);
         return;
       }
   
-      // Increase retry interval exponentially but cap it
-      const nextInterval = Math.min(this.messageRetryInterval * Math.pow(1.5, tr.retryCount), 10000);
+      // Exponential backoff with jitter
+      const baseInterval = this.messageRetryInterval * Math.pow(1.5, tr.retryCount - 1);
+      const jitter = Math.random() * 500; // Add up to 500ms jitter
+      const nextInterval = Math.min(baseInterval + jitter, 8000);
       
-      console.log(`Gossip: Retry #${tr.retryCount} for message ${messageId} to ${unacked.length} peers (next retry in ${nextInterval}ms)`);
+      console.log(`Gossip: Retry #${tr.retryCount} for ${messageId} to ${unacked.length} peers (next in ${Math.round(nextInterval)}ms)`);
       
       for (const peerId of unacked) {
         try {
@@ -443,4 +480,3 @@ class GossipMessage {
       tr.timerId = setTimeout(() => this._retryMessageDelivery(messageId), nextInterval);
     }
   }
-  
