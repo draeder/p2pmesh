@@ -206,6 +206,33 @@ document.addEventListener('DOMContentLoaded', () => {
       await mesh.join();
       statusEl.textContent = 'Status: Mesh joined. Waiting for peers...';
       addMessage('Mesh joined. Your ID: ' + mesh.peerId, 'system');
+      
+      // Subscribe to the same 'chat_message' topic as Node.js clients to ensure consistency
+      mesh.subscribe('chat_message', (message) => {
+        let displayData = message;
+        try {
+          if (typeof message === 'object' && message !== null) {
+            if (typeof message.payload !== 'undefined') {
+              displayData = message.payload;
+            }
+            
+            if (typeof displayData === 'object' && displayData !== null) {
+              displayData = JSON.stringify(displayData, null, 2);
+            }
+          }
+        } catch (e) {
+          console.error('Error processing broadcast message:', e);
+          displayData = String(message);
+        }
+        
+        // Display in the same format as direct messages
+        if (message.originPeerId) {
+          addMessage(String(displayData), 'remote', message.originPeerId);
+        } else {
+          addMessage(`Broadcast: ${displayData}`, 'remote', 'Unknown');
+        }
+      });
+      
       updateConnectedPeersList();
 
     } catch (error) {
