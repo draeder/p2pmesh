@@ -4,12 +4,13 @@ import { calculateDistance } from '../kademlia.js';
 
 /**
  * Manages peer connection lifecycle, eviction, and connection limits
+ * STABILIZED: Reduced churn with conservative connection management
  */
 export class ConnectionManager {
   constructor(options = {}) {
     this.localPeerId = options.localPeerId;
     this.maxPeers = options.maxPeers || 5;
-    this.minPeers = Math.max(1, Math.floor(this.maxPeers / 2)); // Ensure minimum connectivity
+    this.minPeers = Math.max(1, Math.floor(this.maxPeers * 0.5)); // STABILIZED: Less aggressive minimum (50% of max)
     this.iceServers = options.iceServers;
     this.kademlia = options.kademlia;
     this.transportInstance = options.transportInstance;
@@ -20,12 +21,39 @@ export class ConnectionManager {
     this.pendingConnections = options.pendingConnections;
     this.setupPeerEvents = options.setupPeerEvents; // Callback to setup events
     
-    // Track disconnection events to trigger reconnection
+    // STABILIZED: Track disconnection events with backoff
     this.lastDisconnectionTime = 0;
     this.reconnectionAttempts = new Map(); // peerId -> attempt count
-    this.maxReconnectionAttempts = 3;
+    this.maxReconnectionAttempts = 3; // REDUCED: Fewer reconnection attempts to prevent loops
+    this.reconnectionBackoff = new Map(); // peerId -> next allowed reconnection time
+    this.baseReconnectionDelay = 5000; // 5 seconds base delay
+    this.maxReconnectionDelay = 60000; // 1 minute max delay
     
-    console.log(`ConnectionManager initialized: maxPeers=${this.maxPeers}, minPeers=${this.minPeers}`);
+    // STABILIZED: Less frequent connectivity check to reduce churn
+    this.connectivityCheckInterval = setInterval(() => {
+      this.periodicConnectivityCheck();
+    }, 20000); // Check every 20 seconds (much less frequent)
+    
+    console.log(`ConnectionManager initialized: maxPeers=${this.maxPeers}, minPeers=${this.minPeers} - STABILIZED MODE`);
+  }
+
+  /**
+   * STABILIZED: Conservative periodic connectivity check
+   */
+  async periodicConnectivityCheck() {
+    const connectedCount = this.getConnectedPeerCount();
+    const pendingCount = this.pendingConnections.size;
+    const totalCount = connectedCount + pendingCount;
+    
+    // STABILIZED: Only trigger reconnection if we're significantly under-connected
+    if (connectedCount < this.minPeers && totalCount < this.minPeers) {
+      console.log(`STABILITY: Below minimum connectivity (${connectedCount}/${this.minPeers}), seeking connections...`);
+      await this.ensureMinimumConnectivity();
+    } else if (connectedCount === 0 && pendingCount === 0) {
+      // Only be aggressive if we have no connections at all
+      console.log(`STABILITY: No connections, attempting emergency reconnection...`);
+      await this.ensureMinimumConnectivity();
+    }
   }
 
   /**
@@ -43,20 +71,31 @@ export class ConnectionManager {
     const pendingCount = this.pendingConnections.size;
     const totalCount = connectedCount + pendingCount;
     
-    return totalCount < this.minPeers;
+    return connectedCount < this.minPeers && totalCount < this.minPeers;
   }
 
   /**
-   * Trigger reconnection when below minimum connectivity
+   * STABILIZED: Conservative connectivity management
    */
   async ensureMinimumConnectivity() {
-    if (!this.needsReconnection()) return;
-    
     const connectedCount = this.getConnectedPeerCount();
     const pendingCount = this.pendingConnections.size;
-    const needed = this.minPeers - (connectedCount + pendingCount);
+    const totalCount = connectedCount + pendingCount;
     
-    console.log(`Below minimum connectivity: connected=${connectedCount}, pending=${pendingCount}, need=${needed} more`);
+    // STABILIZED: Only seek connections if we're below minimum
+    if (connectedCount >= this.minPeers) {
+      console.log(`STABILITY: Already at minimum connectivity (${connectedCount}/${this.minPeers}), no action needed`);
+      return;
+    }
+    
+    const needed = Math.min(this.minPeers - totalCount, 2); // STABILIZED: Connect to max 2 peers at once
+    
+    if (needed <= 0) {
+      console.log(`STABILITY: Sufficient pending connections (${pendingCount}), waiting...`);
+      return;
+    }
+    
+    console.log(`STABILITY: Seeking ${needed} connections to reach minimum (${connectedCount}/${this.minPeers})`);
     
     // Get potential peers from Kademlia routing table
     const allContacts = this.kademlia.routingTable.getAllContacts
@@ -69,41 +108,67 @@ export class ConnectionManager {
         id !== this.localPeerId && 
         !this.peers.has(id) && 
         !this.pendingConnections.has(id) &&
-        (this.reconnectionAttempts.get(id) || 0) < this.maxReconnectionAttempts
+        this.canReconnectToPeer(id)
       );
     
     if (availablePeers.length === 0) {
-      console.log('No available peers for reconnection');
+      console.log('STABILITY: No available peers for connection');
       return;
     }
     
-    // Sort by distance (closer peers first)
-    availablePeers.sort((a, b) => {
-      try {
-        const distA = calculateDistance(this.localPeerId, a);
-        const distB = calculateDistance(this.localPeerId, b);
-        return distA < distB ? -1 : distA > distB ? 1 : 0;
-      } catch (error) {
-        return 0; // Keep original order if distance calculation fails
-      }
-    });
-    
-    // Connect to the closest available peers
+    // STABILIZED: Connect to available peers conservatively
     const peersToConnect = availablePeers.slice(0, needed);
-    console.log(`Attempting to reconnect to ${peersToConnect.length} peers:`, peersToConnect);
+    console.log(`STABILITY: Attempting to connect to ${peersToConnect.length} peers:`, peersToConnect);
     
     for (const peerId of peersToConnect) {
       try {
         await this.connectToPeer(peerId, true);
-        this.reconnectionAttempts.set(peerId, (this.reconnectionAttempts.get(peerId) || 0) + 1);
+        this.updateReconnectionAttempt(peerId);
+        
+        // STABILIZED: Add delay between connection attempts
+        await new Promise(resolve => setTimeout(resolve, 1000));
       } catch (error) {
-        console.error(`Failed to reconnect to ${peerId}:`, error);
+        console.error(`STABILITY: Failed to connect to ${peerId}:`, error);
       }
     }
   }
 
   /**
-   * Handle peer disconnection and trigger reconnection if needed
+   * STABILIZED: Check if we can reconnect to a peer (respects backoff)
+   */
+  canReconnectToPeer(peerId) {
+    const attempts = this.reconnectionAttempts.get(peerId) || 0;
+    if (attempts >= this.maxReconnectionAttempts) {
+      return false;
+    }
+    
+    const backoffTime = this.reconnectionBackoff.get(peerId);
+    if (backoffTime && Date.now() < backoffTime) {
+      return false;
+    }
+    
+    return true;
+  }
+
+  /**
+   * STABILIZED: Update reconnection attempt with exponential backoff
+   */
+  updateReconnectionAttempt(peerId) {
+    const attempts = (this.reconnectionAttempts.get(peerId) || 0) + 1;
+    this.reconnectionAttempts.set(peerId, attempts);
+    
+    // Calculate exponential backoff
+    const delay = Math.min(
+      this.baseReconnectionDelay * Math.pow(2, attempts - 1),
+      this.maxReconnectionDelay
+    );
+    
+    this.reconnectionBackoff.set(peerId, Date.now() + delay);
+    console.log(`STABILITY: Set reconnection backoff for ${peerId}: ${delay}ms (attempt ${attempts})`);
+  }
+
+  /**
+   * STABILIZED: Handle peer disconnection with conservative reconnection
    */
   async onPeerDisconnected(peerId) {
     this.lastDisconnectionTime = Date.now();
@@ -113,26 +178,30 @@ export class ConnectionManager {
     this.peerConnectionAttempts.delete(peerId);
     this.pendingConnections.delete(peerId);
     
-    console.log(`Peer ${peerId} disconnected. Connected peers: ${this.getConnectedPeerCount()}`);
+    const connectedCount = this.getConnectedPeerCount();
+    console.log(`STABILITY: Peer ${peerId} disconnected. Connected peers: ${connectedCount}/${this.maxPeers} max`);
     
-    // Check if we need to reconnect
-    if (this.needsReconnection()) {
-      console.log('Below minimum connectivity, triggering reconnection...');
-      // Add a small delay to avoid rapid reconnection attempts
-      setTimeout(() => this.ensureMinimumConnectivity(), 1000);
+    // STABILIZED: Only trigger reconnection if we're below minimum and not too recently
+    const timeSinceLastDisconnection = Date.now() - this.lastDisconnectionTime;
+    if (connectedCount < this.minPeers && timeSinceLastDisconnection > 2000) {
+      console.log('STABILITY: Below minimum connectivity, scheduling delayed reconnection...');
+      // STABILIZED: Longer delay to prevent rapid reconnection cycles
+      setTimeout(() => this.ensureMinimumConnectivity(), 5000);
     }
   }
 
   /**
-   * Requests a connection to a new peer with proper maxPeers management
-   * @param {string} remotePeerId - Peer ID to connect to
-   * @param {boolean} initiator - Whether this peer should initiate the connection
-   * @returns {Promise<boolean>} True if connection was allowed, false otherwise
+   * FIXED: Smart connection requests with eviction for better connectivity
    */
   async requestConnection(remotePeerId, initiator = true) {
-    // Check if already connected or connecting
     if (this.peers.has(remotePeerId) || this.pendingConnections.has(remotePeerId)) {
       console.log(`Already connected or connecting to ${remotePeerId}`);
+      return false;
+    }
+
+    // STABILIZED: Check reconnection backoff
+    if (!this.canReconnectToPeer(remotePeerId)) {
+      console.log(`Cannot reconnect to ${remotePeerId}: in backoff period or max attempts reached`);
       return false;
     }
 
@@ -142,38 +211,27 @@ export class ConnectionManager {
 
     console.log(`Connection request from ${remotePeerId}: Connected=${connectedPeerCount}, Pending=${pendingPeerCount}, Total=${totalPeerCount}, Max=${this.maxPeers}`);
 
-    // If we're under the limit, allow the connection
+    // STABILIZED: Allow connections if we're under maxPeers
     if (totalPeerCount < this.maxPeers) {
-      console.log(`Allowing connection to ${remotePeerId} (${totalPeerCount + 1}/${this.maxPeers})`);
+      console.log(`STABILITY: Allowing connection to ${remotePeerId} (${totalPeerCount + 1}/${this.maxPeers})`);
       await this.connectToPeer(remotePeerId, initiator);
       return true;
     }
 
-    // If at limit, try eviction strategy (but ensure we don't go below minimum)
-    const evicted = this.evictFurthestPeer(remotePeerId);
+    // FIXED: Enable smart eviction for better connectivity even in small networks
+    const evicted = this.evictForBetterConnectivity(remotePeerId);
     if (evicted) {
-      console.log(`Evicted furthest peer to make room for ${remotePeerId}`);
+      console.log(`STABILITY: Evicted peer to make room for better connectivity with ${remotePeerId}`);
       await this.connectToPeer(remotePeerId, initiator);
       return true;
     }
 
-    // If eviction failed, check if we can replace a stalled connection
-    const stalledPeer = this.findStalledConnection();
-    if (stalledPeer) {
-      console.log(`Replacing stalled connection ${stalledPeer} with ${remotePeerId}`);
-      this.forceDisconnectPeer(stalledPeer);
-      await this.connectToPeer(remotePeerId, initiator);
-      return true;
-    }
-
-    console.log(`Cannot connect to ${remotePeerId}: max peers (${this.maxPeers}) reached and no eviction possible`);
+    console.log(`STABILITY: Cannot connect to ${remotePeerId}: max peers (${this.maxPeers}) reached and no beneficial eviction available`);
     return false;
   }
 
   /**
    * Attempts to connect to a new peer
-   * @param {string} remotePeerId - Peer ID to connect to
-   * @param {boolean} initiator - Whether this peer should initiate the connection
    */
   async connectToPeer(remotePeerId, initiator = true) {
     if (this.peers.has(remotePeerId) || this.pendingConnections.has(remotePeerId)) {
@@ -181,7 +239,6 @@ export class ConnectionManager {
       return;
     }
 
-    // Mark as pending to prevent race conditions
     this.pendingConnections.add(remotePeerId);
 
     try {
@@ -197,128 +254,95 @@ export class ConnectionManager {
   }
 
   /**
-   * Evicts the furthest peer to make room for a closer one
-   * @param {string} newPeerId - ID of the new peer to connect to
-   * @returns {boolean} True if eviction occurred, false otherwise
+   * FIXED: Smart eviction for better connectivity (works for all network sizes)
    */
-  evictFurthestPeer(newPeerId) {
+  evictForBetterConnectivity(newPeerId) {
     try {
       const connectedCount = this.getConnectedPeerCount();
       
-      // Don't evict if we're at or below minimum connectivity
-      if (connectedCount <= this.minPeers) {
-        console.log(`Cannot evict: at minimum connectivity (${connectedCount}/${this.minPeers})`);
+      // Only evict if we're at maxPeers
+      if (connectedCount < this.maxPeers) {
+        console.log(`STABILITY: Not at maxPeers (${connectedCount}/${this.maxPeers}), no eviction needed`);
         return false;
       }
       
+      // FIXED: Use distance-based eviction for all network sizes
       const distanceToNewPeer = calculateDistance(this.localPeerId, newPeerId);
       
-      // First try to find the furthest peer from Kademlia routing table (fully connected peers)
-      const furthestPeerContact = this.kademlia.routingTable.getFurthestContact();
-      
-      if (furthestPeerContact) {
-        const distanceToFurthestPeer = calculateDistance(this.localPeerId, furthestPeerContact.id);
-
-        if (distanceToNewPeer < distanceToFurthestPeer) {
-          console.log(`Kademlia eviction: New peer ${newPeerId} (dist: ${distanceToNewPeer}) is closer than furthest connected peer ${furthestPeerContact.id} (dist: ${distanceToFurthestPeer})`);
-          
-          const furthestPeerConnection = this.peers.get(furthestPeerContact.id);
-          if (furthestPeerConnection) {
-            this.sendReconnectionData(furthestPeerConnection, furthestPeerContact.id, 'evicted_for_closer_peer');
-            this.forceDisconnectPeer(furthestPeerContact.id);
-            return true;
-          }
-        }
-      }
-      
-      // If no Kademlia contacts or new peer isn't closer, try evicting from all current peers
+      // Find the furthest connected peer
       let furthestPeerId = null;
-      let maxDistance = -1n;
+      let furthestDistance = 0;
       
-      // Check all current peers (connected only, not pending)
-      for (const [peerId, peer] of this.peers.entries()) {
-        if (peerId !== newPeerId && peer.connected) {
-          try {
-            const distance = calculateDistance(this.localPeerId, peerId);
-            if (distance > maxDistance) {
-              maxDistance = distance;
-              furthestPeerId = peerId;
-            }
-          } catch (error) {
-            console.warn(`Error calculating distance to peer ${peerId}:`, error);
-            // If we can't calculate distance, consider this peer for eviction
+      this.peers.forEach((peer, peerId) => {
+        if (peer.connected) {
+          const distance = calculateDistance(this.localPeerId, peerId);
+          if (distance > furthestDistance) {
+            furthestDistance = distance;
             furthestPeerId = peerId;
-            maxDistance = BigInt(Number.MAX_SAFE_INTEGER);
           }
         }
-      }
+      });
       
-      // If the new peer is closer than the furthest current peer, evict the furthest
-      if (furthestPeerId && (distanceToNewPeer < maxDistance || maxDistance === BigInt(Number.MAX_SAFE_INTEGER))) {
-        console.log(`Distance-based eviction: New peer ${newPeerId} (dist: ${distanceToNewPeer}) replacing furthest peer ${furthestPeerId} (dist: ${maxDistance})`);
-        
-        const furthestPeerConnection = this.peers.get(furthestPeerId);
-        if (furthestPeerConnection) {
-          this.sendReconnectionData(furthestPeerConnection, furthestPeerId, 'evicted_for_closer_peer');
-        }
-        
+      // Only evict if the new peer is closer than the furthest peer
+      if (furthestPeerId && distanceToNewPeer < furthestDistance) {
+        console.log(`STABILITY: Evicting furthest peer ${furthestPeerId} (distance: ${furthestDistance}) for closer peer ${newPeerId} (distance: ${distanceToNewPeer})`);
         this.forceDisconnectPeer(furthestPeerId);
         return true;
       }
       
-      console.log(`No eviction: new peer ${newPeerId} (dist: ${distanceToNewPeer}) is not closer than existing peers`);
+      // ENHANCED: Also check for stalled connections that can be replaced
+      const stalledPeer = this.findStalledConnection();
+      if (stalledPeer) {
+        console.log(`STABILITY: Evicting stalled connection ${stalledPeer} for new peer ${newPeerId}`);
+        this.forceDisconnectPeer(stalledPeer);
+        return true;
+      }
+      
+      console.log(`STABILITY: New peer ${newPeerId} (distance: ${distanceToNewPeer}) not closer than furthest peer ${furthestPeerId} (distance: ${furthestDistance}), no eviction`);
       return false;
       
     } catch (error) {
-      console.error(`Error in evictFurthestPeer for ${newPeerId}:`, error);
-      
-      // Fallback: only evict if we're above minimum connectivity
-      const connectedCount = this.getConnectedPeerCount();
-      if (connectedCount > this.minPeers) {
-        const peerIds = Array.from(this.peers.keys()).filter(id => this.peers.get(id).connected);
-        if (peerIds.length > 0) {
-          const peerToEvict = peerIds[0];
-          console.log(`Fallback eviction: removing ${peerToEvict} due to error`);
-          this.forceDisconnectPeer(peerToEvict);
-          return true;
-        }
-      }
-      
+      console.error(`Error in evictForBetterConnectivity for ${newPeerId}:`, error);
       return false;
     }
   }
 
   /**
-   * Finds a stalled connection that can be replaced
-   * @returns {string|null} Peer ID of stalled connection or null
+   * ENHANCED: Find a stalled connection that can be replaced
    */
   findStalledConnection() {
     const now = Date.now();
-    const STALL_THRESHOLD = 30000; // 30 seconds
-
-    // Look for peers that have been connecting for too long
-    for (const [peerId, timestamp] of this.peerConnectionAttempts.entries()) {
-      if (now - timestamp > STALL_THRESHOLD) {
-        const peer = this.peers.get(peerId);
-        if (peer && !peer.connected) {
+    const STALL_TIMEOUT = 30000; // 30 seconds
+    
+    for (const [peerId, peer] of this.peers) {
+      // Check if peer is connecting but not connected for too long
+      if (!peer.connected && peer.connecting) {
+        const attemptTime = this.peerConnectionAttempts.get(peerId);
+        if (attemptTime && (now - attemptTime) > STALL_TIMEOUT) {
+          console.log(`STABILITY: Found stalled connection to ${peerId} (${now - attemptTime}ms)`);
           return peerId;
         }
       }
-    }
-
-    // Look for peers that are not actually connected despite being in the peers map
-    for (const [peerId, peer] of this.peers.entries()) {
-      if (!peer.connected && !this.peerConnectionAttempts.has(peerId)) {
+      
+      // Check if peer is in a bad state
+      if (peer.destroyed || peer.readyState === 'closed') {
+        console.log(`STABILITY: Found dead connection to ${peerId} (destroyed: ${peer.destroyed}, state: ${peer.readyState})`);
         return peerId;
       }
     }
-
+    
     return null;
   }
 
   /**
+   * Legacy method for backward compatibility
+   */
+  evictFurthestPeer(newPeerId) {
+    return this.evictForBetterConnectivity(newPeerId);
+  }
+
+  /**
    * Forces disconnection of a peer
-   * @param {string} peerId - Peer ID to disconnect
    */
   forceDisconnectPeer(peerId) {
     const peer = this.peers.get(peerId);
@@ -327,52 +351,13 @@ export class ConnectionManager {
       peer.destroy();
     }
     
-    // Clean up tracking
     this.peers.delete(peerId);
     this.peerConnectionAttempts.delete(peerId);
     this.pendingConnections.delete(peerId);
     this.kademlia.routingTable.removeContact(peerId);
     
-    // Check if we need to reconnect after forced disconnection
-    if (this.needsReconnection()) {
-      console.log('Forced disconnection caused connectivity drop, scheduling reconnection...');
-      setTimeout(() => this.ensureMinimumConnectivity(), 2000);
-    }
-  }
-
-  /**
-   * Sends reconnection data to a peer before evicting them
-   * @param {Object} peerConnection - SimplePeer connection
-   * @param {string} peerId - Peer ID being evicted
-   * @param {string} reason - Reason for eviction
-   */
-  sendReconnectionData(peerConnection, peerId, reason) {
-    // Check if the peer connection is still valid and connected
-    if (!peerConnection || peerConnection.destroyed || !peerConnection.connected) {
-      console.log(`Skipping reconnection data for ${peerId}: peer connection is not valid or connected`);
-      return;
-    }
-
-    // Collect information about other peers for reconnection assistance
-    const reconnectPeers = [];
-    this.peers.forEach((peerConn, peerConnId) => {
-      // Don't include the peer we're about to evict
-      if (peerConnId !== peerId && peerConn && peerConn.connected) {
-        reconnectPeers.push(peerConnId);
-      }
-    });
-    
-    // Send reconnection data to the evicted peer
-    try {
-      peerConnection.send(JSON.stringify({
-        type: 'reconnection_data',
-        peers: reconnectPeers,
-        reason: reason
-      }));
-      console.log(`Sent reconnection data to evicted peer ${peerId} with ${reconnectPeers.length} alternative peers`);
-    } catch (error) {
-      console.error(`Failed to send reconnection data to evicted peer ${peerId}:`, error);
-    }
+    // STABILIZED: No immediate reconnection after forced disconnection
+    console.log('Forced disconnection completed, relying on periodic check for reconnection');
   }
 
   /**
@@ -405,7 +390,24 @@ export class ConnectionManager {
       maxPeers: this.maxPeers,
       minPeers: this.minPeers,
       needsReconnection: this.needsReconnection(),
-      lastDisconnectionTime: this.lastDisconnectionTime
+      lastDisconnectionTime: this.lastDisconnectionTime,
+      stabilizedMode: true,
+      reconnectionAttempts: this.reconnectionAttempts.size,
+      peersInBackoff: Array.from(this.reconnectionBackoff.entries()).filter(([_, time]) => Date.now() < time).length
     };
+  }
+
+  /**
+   * Cleanup method to clear intervals
+   */
+  destroy() {
+    if (this.connectivityCheckInterval) {
+      clearInterval(this.connectivityCheckInterval);
+      this.connectivityCheckInterval = null;
+    }
+    
+    // Clear backoff timers
+    this.reconnectionAttempts.clear();
+    this.reconnectionBackoff.clear();
   }
 }

@@ -37,7 +37,7 @@ async function main() {
       transportOptions: {
         signalingServerUrl: signalingServerUrl
       },
-      maxPeers: 3, // Example: limit to 3 peers for the Node.js client
+      maxPeers: 3, // Keep at 3 for testing as requested
       iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] // Public STUN server
     });
     

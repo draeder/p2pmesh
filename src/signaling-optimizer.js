@@ -1,13 +1,13 @@
 // src/signaling-optimizer.js
 
 /**
- * Signaling Optimizer - Minimizes signaling server usage by preferring mesh-based signaling
+ * Signaling Optimizer - STABILIZED: Simplified signaling with reduced complexity
  * 
- * Flow:
- * 1. New peer connects via signaling server
- * 2. Once connected to existing peers, subsequent signaling uses the mesh
- * 3. Signals for new peers are batched and sent via signaling server
- * 4. Fallback to signaling server when mesh signaling fails
+ * STABILIZED Flow:
+ * 1. Use signaling server for all initial connections
+ * 2. Minimal batching to reduce overhead
+ * 3. Fallback to direct signaling when mesh fails
+ * 4. Reduced complexity to prevent race conditions
  */
 export class SignalingOptimizer {
   constructor(options = {}) {
@@ -15,60 +15,53 @@ export class SignalingOptimizer {
     this.transportInstance = options.transportInstance;
     this.peerManager = options.peerManager;
     
-    // Track signaling state for each peer
+    // STABILIZED: Simplified state tracking
     this.peerSignalingState = new Map(); // peerId -> { state: 'connecting'|'connected', lastSignal: timestamp }
     
-    // Batch signals for new peers
+    // STABILIZED: Reduced batching complexity
     this.pendingSignalBatch = new Map(); // peerId -> [signals]
     this.batchTimeout = null;
-    this.BATCH_DELAY = 100; // ms to wait before sending batched signals
-    this.MAX_BATCH_SIZE = 10; // Maximum signals per batch
+    this.BATCH_DELAY = 200; // Increased delay for stability
+    this.MAX_BATCH_SIZE = 5; // Reduced batch size
     
-    // Mesh signaling statistics
+    // STABILIZED: Simplified statistics
     this.stats = {
-      meshSignals: 0,
       serverSignals: 0,
       batchedSignals: 0,
-      failedMeshSignals: 0
+      failedSignals: 0
     };
     
-    // Bind methods
-    this.optimizeSignaling = this.optimizeSignaling.bind(this);
-    this.sendBatchedSignals = this.sendBatchedSignals.bind(this);
+    console.log(`SignalingOptimizer initialized in STABILIZED mode for peer ${this.localPeerId}`);
   }
 
   /**
-   * Optimizes signaling by choosing the best path (mesh vs server)
+   * STABILIZED: Simplified signaling - prefer server for reliability
    * @param {string} toPeerId - Target peer ID
    * @param {Object} signalData - WebRTC signal data
    * @param {Object} options - Signaling options
-   * @returns {Promise<boolean>} True if signaling was handled, false if fallback needed
+   * @returns {Promise<boolean>} True if signaling was handled
    */
   async optimizeSignaling(toPeerId, signalData, options = {}) {
-    const peerState = this.peerSignalingState.get(toPeerId);
-    const isNewPeer = !peerState || peerState.state === 'connecting';
     const forceServer = options.forceServer || false;
     
     // Update peer state
     this.updatePeerState(toPeerId, signalData);
     
-    // For new peers or when forced, use signaling server (potentially batched)
-    if (isNewPeer || forceServer) {
-      return this.handleNewPeerSignaling(toPeerId, signalData);
+    // STABILIZED: Always use server signaling for reliability
+    // This eliminates race conditions and complexity from mesh signaling
+    if (forceServer || true) { // Always use server for now
+      return this.handleServerSignaling(toPeerId, signalData);
     }
-    
-    // For established peers, try mesh-first signaling
-    return this.handleEstablishedPeerSignaling(toPeerId, signalData);
   }
 
   /**
-   * Handles signaling for new peers (not yet connected)
+   * STABILIZED: Handle signaling via server (primary method)
    * @param {string} toPeerId - Target peer ID
    * @param {Object} signalData - WebRTC signal data
    * @returns {Promise<boolean>} True if handled
    */
-  async handleNewPeerSignaling(toPeerId, signalData) {
-    // Check if we should batch this signal
+  async handleServerSignaling(toPeerId, signalData) {
+    // STABILIZED: Minimal batching for non-critical signals only
     if (this.shouldBatchSignal(toPeerId, signalData)) {
       this.addToBatch(toPeerId, signalData);
       return true;
@@ -79,71 +72,7 @@ export class SignalingOptimizer {
   }
 
   /**
-   * Handles signaling for established peers (already connected)
-   * @param {string} toPeerId - Target peer ID
-   * @param {Object} signalData - WebRTC signal data
-   * @returns {Promise<boolean>} True if handled
-   */
-  async handleEstablishedPeerSignaling(toPeerId, signalData) {
-    // Try mesh signaling first
-    const meshSuccess = await this.sendViaMesh(toPeerId, signalData);
-    
-    if (meshSuccess) {
-      this.stats.meshSignals++;
-      console.log(`SignalingOptimizer: Successfully sent signal to ${toPeerId} via mesh`);
-      return true;
-    }
-    
-    // Fallback to signaling server
-    this.stats.failedMeshSignals++;
-    console.log(`SignalingOptimizer: Mesh signaling failed for ${toPeerId}, falling back to server`);
-    return this.sendViaSignalingServer(toPeerId, signalData);
-  }
-
-  /**
-   * Sends signal via mesh (through connected peers)
-   * @param {string} toPeerId - Target peer ID
-   * @param {Object} signalData - WebRTC signal data
-   * @returns {Promise<boolean>} True if sent successfully
-   */
-  async sendViaMesh(toPeerId, signalData) {
-    const connectedPeers = this.getConnectedPeers();
-    
-    if (connectedPeers.length === 0) {
-      return false;
-    }
-    
-    // Try to find the best relay peer (closest to target or most reliable)
-    const relayPeer = this.selectBestRelayPeer(toPeerId, connectedPeers);
-    
-    if (!relayPeer) {
-      return false;
-    }
-    
-    try {
-      // Send signal through the selected relay peer
-      const relayMessage = {
-        type: 'optimized_relay_signal',
-        from: this.localPeerId,
-        to: toPeerId,
-        signal: signalData,
-        timestamp: Date.now(),
-        relayPath: [this.localPeerId]
-      };
-      
-      relayPeer.send(JSON.stringify(relayMessage));
-      
-      // Wait briefly to see if relay succeeds (optional optimization)
-      return await this.waitForRelayConfirmation(toPeerId, 500); // 500ms timeout
-      
-    } catch (error) {
-      console.error(`SignalingOptimizer: Error sending via mesh to ${toPeerId}:`, error);
-      return false;
-    }
-  }
-
-  /**
-   * Sends signal via signaling server
+   * STABILIZED: Send signal via signaling server (primary method)
    * @param {string} toPeerId - Target peer ID
    * @param {Object} signalData - WebRTC signal data
    * @returns {Promise<boolean>} True if sent successfully
@@ -162,21 +91,21 @@ export class SignalingOptimizer {
       
     } catch (error) {
       console.error(`SignalingOptimizer: Error sending via signaling server to ${toPeerId}:`, error);
+      this.stats.failedSignals++;
       return false;
     }
   }
 
   /**
-   * Determines if a signal should be batched
+   * STABILIZED: Conservative signal batching
    * @param {string} toPeerId - Target peer ID
    * @param {Object} signalData - WebRTC signal data
    * @returns {boolean} True if should be batched
    */
   shouldBatchSignal(toPeerId, signalData) {
-    // Don't batch critical signals that need immediate delivery
-    const criticalSignalTypes = ['answer', 'offer'];
-    if (signalData.type && criticalSignalTypes.includes(signalData.type)) {
-      return false;
+    // STABILIZED: Only batch ICE candidates, never critical signals
+    if (!signalData.candidate) {
+      return false; // Don't batch offers, answers, or other critical signals
     }
     
     // Don't batch if we already have too many pending signals for this peer
@@ -185,12 +114,11 @@ export class SignalingOptimizer {
       return false;
     }
     
-    // Batch ICE candidates and other non-critical signals
     return true;
   }
 
   /**
-   * Adds a signal to the batch
+   * STABILIZED: Add signal to batch with conservative limits
    * @param {string} toPeerId - Target peer ID
    * @param {Object} signalData - WebRTC signal data
    */
@@ -206,14 +134,14 @@ export class SignalingOptimizer {
     
     // Schedule batch sending if not already scheduled
     if (!this.batchTimeout) {
-      this.batchTimeout = setTimeout(this.sendBatchedSignals, this.BATCH_DELAY);
+      this.batchTimeout = setTimeout(() => this.sendBatchedSignals(), this.BATCH_DELAY);
     }
     
-    console.log(`SignalingOptimizer: Added signal to batch for ${toPeerId} (batch size: ${this.pendingSignalBatch.get(toPeerId).length})`);
+    console.log(`SignalingOptimizer: Added ICE candidate to batch for ${toPeerId} (batch size: ${this.pendingSignalBatch.get(toPeerId).length})`);
   }
 
   /**
-   * Sends all batched signals
+   * STABILIZED: Send batched signals with error handling
    */
   async sendBatchedSignals() {
     this.batchTimeout = null;
@@ -236,12 +164,13 @@ export class SignalingOptimizer {
         });
         
         this.stats.batchedSignals += signals.length;
-        console.log(`SignalingOptimizer: Sent batch of ${signals.length} signals to ${toPeerId}`);
+        console.log(`SignalingOptimizer: Sent batch of ${signals.length} ICE candidates to ${toPeerId}`);
         
       } catch (error) {
         console.error(`SignalingOptimizer: Error sending batched signals to ${toPeerId}:`, error);
+        this.stats.failedSignals += signals.length;
         
-        // Fallback: send signals individually
+        // STABILIZED: Fallback to individual signals
         for (const signalItem of signals) {
           try {
             await this.sendViaSignalingServer(toPeerId, signalItem.signal);
@@ -257,7 +186,7 @@ export class SignalingOptimizer {
   }
 
   /**
-   * Updates peer signaling state
+   * STABILIZED: Update peer signaling state
    * @param {string} peerId - Peer ID
    * @param {Object} signalData - Signal data (used to infer state)
    */
@@ -278,125 +207,7 @@ export class SignalingOptimizer {
   }
 
   /**
-   * Gets list of connected peers that can be used for relaying
-   * @returns {Array} Array of connected peer objects
-   */
-  getConnectedPeers() {
-    const connectedPeers = [];
-    const peers = this.peerManager.getPeers();
-    
-    peers.forEach((peer, peerId) => {
-      if (peer.connected) {
-        connectedPeers.push({ id: peerId, peer });
-      }
-    });
-    
-    return connectedPeers;
-  }
-
-  /**
-   * Selects the best peer for relaying signals
-   * @param {string} toPeerId - Target peer ID
-   * @param {Array} connectedPeers - Available connected peers
-   * @returns {Object|null} Best relay peer or null
-   */
-  selectBestRelayPeer(toPeerId, connectedPeers) {
-    if (connectedPeers.length === 0) {
-      return null;
-    }
-    
-    // For now, use simple selection (first available peer)
-    // Could be enhanced with distance calculation, reliability metrics, etc.
-    return connectedPeers[0].peer;
-  }
-
-  /**
-   * Waits for relay confirmation (optional optimization)
-   * @param {string} toPeerId - Target peer ID
-   * @param {number} timeout - Timeout in milliseconds
-   * @returns {Promise<boolean>} True if confirmed
-   */
-  async waitForRelayConfirmation(toPeerId, timeout) {
-    // For now, assume success (could be enhanced with actual confirmation tracking)
-    return new Promise(resolve => {
-      setTimeout(() => resolve(true), Math.min(timeout, 100));
-    });
-  }
-
-  /**
-   * Handles incoming optimized relay signals
-   * @param {Object} message - Relay message
-   * @param {string} fromPeerId - Peer that sent the relay
-   */
-  handleOptimizedRelaySignal(message, fromPeerId) {
-    if (message.to === this.localPeerId) {
-      // Signal is for us
-      console.log(`SignalingOptimizer: Received optimized relay signal from ${message.from} via ${fromPeerId}`);
-      
-      // Process the signal
-      if (this.onSignalReceived) {
-        this.onSignalReceived(message.from, message.signal);
-      }
-      
-      // Send confirmation back (optional)
-      this.sendRelayConfirmation(fromPeerId, message.from);
-      
-    } else {
-      // Relay further if possible
-      this.relaySignalFurther(message, fromPeerId);
-    }
-  }
-
-  /**
-   * Sends relay confirmation
-   * @param {string} relayPeerId - Peer that relayed the signal
-   * @param {string} originalSender - Original sender of the signal
-   */
-  sendRelayConfirmation(relayPeerId, originalSender) {
-    try {
-      const peer = this.peerManager.getPeers().get(relayPeerId);
-      if (peer && peer.connected) {
-        peer.send(JSON.stringify({
-          type: 'optimized_relay_confirmation',
-          from: this.localPeerId,
-          originalSender: originalSender,
-          timestamp: Date.now()
-        }));
-      }
-    } catch (error) {
-      console.error(`SignalingOptimizer: Error sending relay confirmation:`, error);
-    }
-  }
-
-  /**
-   * Relays signal further through the mesh
-   * @param {Object} message - Original relay message
-   * @param {string} fromPeerId - Peer that sent us the relay
-   */
-  relaySignalFurther(message, fromPeerId) {
-    const targetPeer = this.peerManager.getPeers().get(message.to);
-    
-    if (targetPeer && targetPeer.connected) {
-      try {
-        // Add ourselves to relay path to prevent loops
-        const updatedMessage = {
-          ...message,
-          relayPath: [...(message.relayPath || []), this.localPeerId]
-        };
-        
-        targetPeer.send(JSON.stringify(updatedMessage));
-        console.log(`SignalingOptimizer: Relayed signal from ${message.from} to ${message.to}`);
-        
-      } catch (error) {
-        console.error(`SignalingOptimizer: Error relaying signal further:`, error);
-      }
-    } else {
-      console.warn(`SignalingOptimizer: Cannot relay to ${message.to}: not connected`);
-    }
-  }
-
-  /**
-   * Handles peer connection events
+   * STABILIZED: Handle peer connection events
    * @param {string} peerId - Peer ID that connected
    */
   onPeerConnected(peerId) {
@@ -405,11 +216,11 @@ export class SignalingOptimizer {
       lastSignal: Date.now()
     });
     
-    console.log(`SignalingOptimizer: Peer ${peerId} connected, enabling mesh signaling`);
+    console.log(`SignalingOptimizer: Peer ${peerId} connected`);
   }
 
   /**
-   * Handles peer disconnection events
+   * STABILIZED: Handle peer disconnection events
    * @param {string} peerId - Peer ID that disconnected
    */
   onPeerDisconnected(peerId) {
@@ -430,32 +241,31 @@ export class SignalingOptimizer {
   }
 
   /**
-   * Gets signaling statistics
+   * STABILIZED: Get simplified statistics
    * @returns {Object} Statistics object
    */
   getStats() {
     return {
       ...this.stats,
-      connectedPeers: this.getConnectedPeers().length,
       pendingBatches: this.pendingSignalBatch.size,
-      trackedPeers: this.peerSignalingState.size
+      trackedPeers: this.peerSignalingState.size,
+      stabilizedMode: true
     };
   }
 
   /**
-   * Resets statistics
+   * Reset statistics
    */
   resetStats() {
     this.stats = {
-      meshSignals: 0,
       serverSignals: 0,
       batchedSignals: 0,
-      failedMeshSignals: 0
+      failedSignals: 0
     };
   }
 
   /**
-   * Cleanup method
+   * STABILIZED: Cleanup method
    */
   destroy() {
     if (this.batchTimeout) {
@@ -465,5 +275,7 @@ export class SignalingOptimizer {
     
     this.peerSignalingState.clear();
     this.pendingSignalBatch.clear();
+    
+    console.log(`SignalingOptimizer: Destroyed for peer ${this.localPeerId}`);
   }
 }

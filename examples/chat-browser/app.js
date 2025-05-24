@@ -64,7 +64,7 @@ document.addEventListener('DOMContentLoaded', () => {
         transportOptions: {
           signalingServerUrl: signalingServerUrl
         },
-        maxPeers: 3,
+        maxPeers: 3, // Keep at 3 for testing as requested
         iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
       });
       
@@ -95,7 +95,7 @@ document.addEventListener('DOMContentLoaded', () => {
         // Add tracking to prevent duplicate timeout/disconnect messages
         if (!disconnectedPeers.has(peerId)) {
           disconnectedPeers.add(peerId);
-          addMessage(`Connection to peer ${peerId} timed out after ${CONNECTION_TIMEOUT/1000} seconds`, 'system');
+          addMessage(`Connection to peer ${peerId} timed out`, 'system');
           statusEl.textContent = 'Status: Peer connection timed out. Mesh active.';
           updateConnectedPeersList();
         }
@@ -209,10 +209,19 @@ document.addEventListener('DOMContentLoaded', () => {
       
       // Subscribe to the same 'chat_message' topic as Node.js clients to ensure consistency
       mesh.subscribe('chat_message', (message) => {
+        console.log('FIXED: Received gossip message:', message);
+        
         let displayData = message;
+        let senderPeerId = 'Unknown';
+        
         try {
           if (typeof message === 'object' && message !== null) {
-            if (typeof message.payload !== 'undefined') {
+            // FIXED: Check multiple possible fields for sender ID
+            senderPeerId = message.from || message.originPeerId || message.messageId?.split('-')[0] || 'Unknown';
+            
+            if (typeof message.data !== 'undefined') {
+              displayData = message.data;
+            } else if (typeof message.payload !== 'undefined') {
               displayData = message.payload;
             }
             
@@ -225,12 +234,9 @@ document.addEventListener('DOMContentLoaded', () => {
           displayData = String(message);
         }
         
-        // Display in the same format as direct messages
-        if (message.originPeerId) {
-          addMessage(String(displayData), 'remote', message.originPeerId);
-        } else {
-          addMessage(`Broadcast: ${displayData}`, 'remote', 'Unknown');
-        }
+        // FIXED: Always show the sender peer ID instead of "Unknown"
+        console.log(`FIXED: Displaying message from ${senderPeerId}: ${displayData}`);
+        addMessage(String(displayData), 'remote', senderPeerId);
       });
       
       updateConnectedPeersList();

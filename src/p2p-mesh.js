@@ -43,10 +43,10 @@ export class P2PMesh {
 
     console.log(`Initializing P2PMesh with ID: ${this.localPeerId}`);
 
-    // Initialize Kademlia DHT
+    // FIXED: Initialize Kademlia DHT (transport only for initial bootstrapping)
     this.kademliaInstance = new KademliaDHT(this.localPeerId, this.transportInstance, { k: this.kademliaK });
 
-    // Set up transport event handlers for Kademlia
+    // Set up transport event handlers for initial bootstrapping only
     this.setupTransportEventHandlers();
 
     // Initialize PeerManager
@@ -65,9 +65,14 @@ export class P2PMesh {
         'message': (data) => this.emit('message', data),
         'signal': (data) => this.emit('signal', data),
         'gossip': (data, remotePeerId) => this.gossipProtocol?.handleIncomingMessage(data, remotePeerId),
-        'reconnection_data': (data, remotePeerId) => this.handleReconnectionData(data, remotePeerId)
+        'reconnection_data': (data, remotePeerId) => this.handleReconnectionData(data, remotePeerId),
+        // FIXED: Handle Kademlia RPC via direct WebRTC
+        'kademlia_rpc': (data, remotePeerId) => this.handleKademliaRpc(data, remotePeerId)
       }
     });
+
+    // FIXED: Wire up Kademlia with PeerManager for direct WebRTC communication
+    this.kademliaInstance.setPeerManager(this.peerManager);
 
     // Initialize PeerDiscovery
     this.peerDiscovery = new PeerDiscovery({
@@ -82,7 +87,8 @@ export class P2PMesh {
     this.gossipProtocol = new GossipProtocol({
       localPeerId: this.localPeerId,
       dht: this.kademliaInstance,
-      sendFunction: (peerId, data) => this.peerManager.sendRawToPeer(peerId, data)
+      sendFunction: (peerId, data) => this.peerManager.sendRawToPeer(peerId, data),
+      getPeerConnectionStatus: (peerId) => this.getPeerConnectionStatus(peerId)
     });
 
     // Connect gossip protocol to mesh event system
@@ -102,22 +108,31 @@ export class P2PMesh {
   }
 
   /**
-   * Sets up transport event handlers for Kademlia
+   * FIXED: Handle Kademlia RPC messages via direct WebRTC
+   * @param {Object} data - Kademlia RPC data
+   * @param {string} remotePeerId - Peer ID that sent the RPC
+   */
+  handleKademliaRpc(data, remotePeerId) {
+    if (data.message) {
+      // Check if this is a response to a pending RPC
+      if (data.message.inReplyTo) {
+        console.log(`P2PMesh: Received Kademlia RPC response via WebRTC from ${remotePeerId}`);
+        this.kademliaInstance.handleIncomingRpcResponse(remotePeerId, data.message);
+      } else {
+        // This is a new RPC request
+        console.log(`P2PMesh: Received Kademlia RPC request via WebRTC from ${remotePeerId}`);
+        this.kademliaInstance.handleIncomingRpc(remotePeerId, data.message);
+      }
+    }
+  }
+
+  /**
+   * FIXED: Sets up transport event handlers for initial bootstrapping only
+   * Kademlia RPC will NOT go through WebSocket transport
    */
   setupTransportEventHandlers() {
     if (typeof this.transportInstance.on === 'function') {
-      this.transportInstance.on('kademlia_rpc_message', ({ from, message, reply }) => {
-        console.log(`P2PMesh: Received Kademlia RPC from ${from} via transport wrapper`);
-        const response = this.kademliaInstance.handleIncomingRpc(from, message);
-        if (response && reply && typeof reply === 'function') {
-          reply(response); // If transport supports direct replies for RPCs
-        } else if (response && message.rpcId) {
-          // If no direct reply mechanism, Kademlia's sendKademliaRpc would handle responses via rpcId matching
-          // Or the transport sends the response back to 'from' using its own mechanisms
-          // For now, this assumes the KademliaRPC methods that return values will be sent back by transport.
-          // e.g., transport.sendKademliaRpcResponse(from, response)
-        }
-      });
+      // REMOVED: kademlia_rpc_message handler - now uses direct WebRTC
 
       // Listen for bootstrap peers provided by the transport (e.g., from signaling server)
       this.transportInstance.on('bootstrap_peers', async ({ peers: newBootstrapPeers }) => {
@@ -140,7 +155,7 @@ export class P2PMesh {
         });
       });
     } else {
-      console.warn('P2PMesh: Transport does not support .on method for Kademlia RPC messages or bootstrap_peers.');
+      console.warn('P2PMesh: Transport does not support .on method for bootstrap_peers.');
     }
   }
 
@@ -155,6 +170,63 @@ export class P2PMesh {
     this.transportInstance.on('connect_request', ({ from }) => {
       this.handleConnectRequest(from);
     });
+
+    // FIXED: Handle connection rejections intelligently
+    this.transportInstance.on('connection_rejected', ({ from, reason, alternativePeers }) => {
+      this.handleConnectionRejection(from, reason, alternativePeers);
+    });
+  }
+
+  /**
+   * FIXED: Handle connection rejections and use alternative peers
+   * @param {string} from - Peer that rejected the connection
+   * @param {string} reason - Reason for rejection
+   * @param {Array} alternativePeers - Alternative peers suggested
+   */
+  async handleConnectionRejection(from, reason, alternativePeers) {
+    console.log(`P2PMesh: Connection rejected by ${from} (${reason}), received ${alternativePeers?.length || 0} alternative peers`);
+    
+    // Clean up the failed connection attempt
+    const peers = this.peerManager.getPeers();
+    if (peers.has(from)) {
+      const peer = peers.get(from);
+      if (peer && !peer.connected) {
+        console.log(`P2PMesh: Cleaning up failed connection attempt to ${from}`);
+        peer.destroy();
+        peers.delete(from);
+      }
+    }
+    
+    // Store alternative peers for future discovery
+    if (alternativePeers && alternativePeers.length > 0) {
+      console.log(`P2PMesh: Storing ${alternativePeers.length} alternative peers for future connections`);
+      this.peerDiscovery.storeReconnectionData(alternativePeers);
+      
+      // ENHANCED: Try connecting to alternative peers immediately if we're under-connected
+      const currentPeerCount = this.peerManager.getPeerCount();
+      if (currentPeerCount < Math.floor(this.maxPeers * 0.5)) {
+        console.log(`P2PMesh: Under-connected (${currentPeerCount}/${this.maxPeers}), trying alternative peers immediately`);
+        
+        // Try up to 2 alternative peers with delays
+        const peersToTry = alternativePeers
+          .filter(peerId => peerId !== this.localPeerId && !peers.has(peerId))
+          .slice(0, 2);
+        
+        for (const altPeerId of peersToTry) {
+          if (this.peerManager.getPeerCount() >= this.maxPeers) break;
+          
+          try {
+            console.log(`P2PMesh: Attempting connection to alternative peer: ${altPeerId}`);
+            await this.peerManager.requestConnection(altPeerId, true);
+            
+            // Add delay between attempts
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          } catch (error) {
+            console.error(`P2PMesh: Failed to connect to alternative peer ${altPeerId}:`, error);
+          }
+        }
+      }
+    }
   }
 
   /**
@@ -276,10 +348,10 @@ export class P2PMesh {
       }
     }
 
-    // Start periodic timeout check for stalled peer connections
+    // STABILIZED: Less frequent timeout check to reduce churn
     const connectionTimeoutInterval = setInterval(() => {
       this.peerManager.checkForConnectionTimeouts();
-    }, 5000); // Check every 5 seconds
+    }, 30000); // STABILIZED: Check every 30 seconds instead of 5
     
     // Store the interval for cleanup when leaving the mesh
     this._cleanupIntervals.push(connectionTimeoutInterval);
@@ -290,6 +362,11 @@ export class P2PMesh {
    */
   async leave() {
     console.log('Leaving mesh...');
+    
+    // ENHANCED: Destroy peer discovery first to stop continuous discovery
+    if (this.peerDiscovery) {
+      this.peerDiscovery.destroy();
+    }
     
     // Destroy all peer connections
     this.peerManager.destroy();
@@ -364,6 +441,17 @@ export class P2PMesh {
       this.eventHandlers[event](data);
     }
     
+    // FIXED: When a peer connects, add them as a bridge peer and reset discovery backoff
+    if (event === 'peer:connect' && data && this.gossipProtocol) {
+      console.log(`P2PMesh: Adding newly connected peer ${data} as bridge peer`);
+      this.gossipProtocol.islandHealingManager.addBridgePeer(data);
+      
+      // FIXED: Reset peer discovery backoff when a peer connects
+      if (this.peerDiscovery) {
+        this.peerDiscovery.onPeerConnected();
+      }
+    }
+    
     // Special handling for signal events - needed for relay_signal processing
     if (event === 'signal' && data && data.from && data.signal) {
       this.handleIncomingSignal(data.from, data.signal);
@@ -385,6 +473,27 @@ export class P2PMesh {
   async _connectToPeer(targetPeerId) {
     // Use requestConnection instead of connectToPeer to enforce maxPeers
     return await this.peerManager.requestConnection(targetPeerId, true);
+  }
+
+  /**
+   * Gets the connection status of a specific peer
+   * @param {string} peerId - Peer ID to check
+   * @returns {Object|null} Connection status object or null if peer not found
+   */
+  getPeerConnectionStatus(peerId) {
+    if (!this.peerManager) return null;
+    
+    const peers = this.peerManager.getPeers();
+    const peer = peers.get(peerId);
+    
+    if (!peer) return null;
+    
+    return {
+      connected: peer.connected || false,
+      connecting: peer.connecting || false,
+      destroyed: peer.destroyed || false,
+      readyState: peer.readyState || 'closed'
+    };
   }
 
   /**

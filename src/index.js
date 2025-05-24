@@ -18,7 +18,7 @@ export async function createMesh(options = {}) {
   console.log('P2PMesh creating with options:', options);
 
   const { 
-    maxPeers = 5, 
+    maxPeers = 3, 
     peerId, 
     bootstrapNodes = [], 
     iceServers, 

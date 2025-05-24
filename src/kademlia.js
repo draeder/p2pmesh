@@ -99,6 +99,14 @@ class RoutingTable {
   }
 
   /**
+   * Gets all contacts from all buckets (for Chord overlay)
+   * @returns {Array<object>} All contacts in the routing table
+   */
+  getAllContacts() {
+    return this.buckets.flat();
+  }
+
+  /**
    * Gets the bucket index for a given distance.
    * This is the index of the most significant bit of the XOR distance.
    * @param {BigInt} distance
@@ -161,19 +169,33 @@ class RoutingTable {
 
 /**
  * Kademlia DHT instance.
+ * FIXED: Now uses direct WebRTC peer connections instead of WebSocket transport
  */
 class KademliaDHT {
   constructor(localNodeId, transport, options = {}) {
     this.nodeId = generateNodeId(localNodeId); // Ensure we have a Kademlia-style ID
-    this.transport = transport; // This will be the transportInstance from index.js
+    this.transport = transport; // Keep for initial bootstrapping only
     this.routingTable = new RoutingTable(this.nodeId);
     this.k = options.k || K;
     this.alpha = options.alpha || ALPHA;
     this.storage = new Map(); // Simple key-value store
+    
+    // FIXED: Reference to peer manager for direct WebRTC communication
+    this.peerManager = null; // Will be set by P2PMesh
+    
+    // FIXED: Pending RPC requests (for handling responses)
+    this.pendingRpcs = new Map();
 
     this.rpc = new KademliaRPC(this);
-    // The transport should be adapted to route Kademlia RPC messages
-    // e.g., transport.on('kademlia_rpc', ({from, message}) => this.rpc.handleMessage(from, message));
+  }
+
+  /**
+   * FIXED: Set peer manager reference for direct WebRTC communication
+   * @param {PeerManager} peerManager - The peer manager instance
+   */
+  setPeerManager(peerManager) {
+    this.peerManager = peerManager;
+    console.log('Kademlia: Peer manager reference set for direct WebRTC communication');
   }
 
   /**
@@ -194,8 +216,7 @@ class KademliaDHT {
   }
 
   /**
-   * Initiates a FIND_NODE RPC to find k closest peers to targetId.
-   * This is a simplified iterative process.
+   * FIXED: Initiates a FIND_NODE RPC with better error handling and shorter timeouts
    * @param {string} targetId
    * @returns {Promise<Array<object>>} List of k closest contacts found.
    */
@@ -208,7 +229,7 @@ class KademliaDHT {
     // Keep track of nodes to query in the current iteration
     let nodesToQuery = [...closestNodes];
 
-    while (lookupRound < 10) { // Limit iterations to prevent infinite loops
+    while (lookupRound < 5) { // FIXED: Reduced iterations to prevent long waits
         const promises = [];
         let newNodesFoundInRound = false;
 
@@ -248,9 +269,9 @@ class KademliaDHT {
                         }
                     })
                     .catch(err => {
-                        console.error(`Kademlia: FIND_NODE - Error querying ${contact.id}:`, err);
-                        // Handle unresponsive node, e.g., remove from routing table or mark as stale
-                        this.routingTable.removeContact(contact.id);
+                        console.warn(`Kademlia: FIND_NODE - Error querying ${contact.id}:`, err.message);
+                        // FIXED: Don't remove contact immediately, just log the error
+                        // this.routingTable.removeContact(contact.id);
                     })
             );
         }
@@ -313,7 +334,7 @@ class KademliaDHT {
     let queried = new Set();
     let valueFound = null;
 
-    for (let i = 0; i < 10 && !valueFound; i++) { // Limit iterations
+    for (let i = 0; i < 5 && !valueFound; i++) { // FIXED: Reduced iterations
         const promises = [];
         const currentBatchToQuery = closestNodes.filter(n => !queried.has(n.id)).slice(0, this.alpha);
 
@@ -334,7 +355,7 @@ class KademliaDHT {
                             response.contacts.forEach(c => this.routingTable.addContact(c));
                         }
                     })
-                    .catch(err => console.error(`Kademlia: FIND_VALUE - Error querying ${contact.id}:`, err))
+                    .catch(err => console.warn(`Kademlia: FIND_VALUE - Error querying ${contact.id}:`, err.message))
             );
         }
         await Promise.all(promises);
@@ -349,62 +370,183 @@ class KademliaDHT {
     return { value: null, foundNatively: false };
   }
 
-  // Method to be called by transport when a Kademlia message is received
+  /**
+   * FIXED: Handle incoming Kademlia RPC via direct WebRTC peer connection
+   * @param {string} fromPeerId - Peer ID sending the message
+   * @param {Object} message - Kademlia RPC message
+   * @returns {Object|null} Response message or null
+   */
   handleIncomingRpc(fromPeerId, message) {
-    // Assuming 'fromPeerId' is the Kademlia ID of the sender
-    // and 'message' is the parsed Kademlia RPC message object
-    // The actual peer object (with transport details) might be needed for sending replies
-    // This requires the transport to map its internal peer IDs/connections to Kademlia IDs
-    console.log(`Kademlia: Received RPC from ${fromPeerId}:`, message);
+    console.log(`Kademlia: Received RPC via WebRTC from ${fromPeerId}:`, message.type, `(RPC ID: ${message.rpcId})`);
+    
     // Add sender to routing table (common Kademlia practice)
-    // The 'address' here is conceptual; it's whatever the transport needs to reply.
-    // This might be implicit if the transport handles replies based on incoming connection.
-    this.routingTable.addContact({ id: fromPeerId, address: 'unknown' /* placeholder */ });
+    this.routingTable.addContact({ id: fromPeerId, address: fromPeerId });
 
-    return this.rpc.handleMessage(fromPeerId, message);
+    const response = this.rpc.handleMessage(fromPeerId, message);
+    
+    // FIXED: Send response directly via WebRTC peer connection
+    if (response && this.peerManager) {
+      console.log(`Kademlia: Sending RPC response ${response.type} to ${fromPeerId} (in reply to: ${response.inReplyTo})`);
+      this.peerManager.sendRawToPeer(fromPeerId, {
+        type: 'kademlia_rpc',
+        message: response
+      });
+    }
+    
+    return response;
+  }
+
+  /**
+   * FIXED: Handle incoming Kademlia RPC response via direct WebRTC
+   * @param {string} fromPeerId - Peer ID sending the response
+   * @param {Object} response - Kademlia RPC response
+   */
+  handleIncomingRpcResponse(fromPeerId, response) {
+    console.log(`Kademlia: Received RPC response via WebRTC from ${fromPeerId}:`, response.type, `(in reply to: ${response.inReplyTo})`);
+    
+    // Find and resolve the pending RPC promise
+    if (response.inReplyTo && this.pendingRpcs.has(response.inReplyTo)) {
+      const { resolve } = this.pendingRpcs.get(response.inReplyTo);
+      this.pendingRpcs.delete(response.inReplyTo);
+      
+      console.log(`Kademlia: Resolving pending RPC ${response.inReplyTo} with response type ${response.type}`);
+      
+      // Process the response based on type
+      switch (response.type) {
+        case 'FIND_NODE_REPLY':
+          resolve(response.contacts || []);
+          break;
+        case 'FIND_VALUE_REPLY':
+          resolve(response);
+          break;
+        case 'PONG':
+          resolve(true);
+          break;
+        case 'STORE_REPLY':
+          resolve(response.success || false);
+          break;
+        default:
+          resolve(response);
+      }
+    } else {
+      console.warn(`Kademlia: Received response with unknown or missing RPC ID: ${response.inReplyTo}`);
+    }
   }
 }
 
 /**
- * Handles Kademlia RPC messages (PING, FIND_NODE, FIND_VALUE, STORE).
+ * FIXED: Handles Kademlia RPC messages via direct WebRTC peer connections
  */
 class KademliaRPC {
   constructor(dhtInstance) {
     this.dht = dhtInstance; // Reference to the main KademliaDHT instance
   }
 
-  // --- Methods to send RPCs (via transport) ---
+  // --- FIXED: Methods to send RPCs via direct WebRTC peer connections ---
   async sendPing(toPeerId) {
-    const message = { type: 'PING', id: this.dht.nodeId, rpcId: generateNodeId() };
-    console.log(`Kademlia: Sending PING to ${toPeerId}`);
-    // The transport needs a way to send to a Kademlia ID, or this needs the transport-specific peer object.
-    // For now, assume transport.sendKademliaMessage(toPeerId, message) exists or similar.
-    // This will be a promise that resolves with the PONG or times out.
-    return this.dht.transport.sendKademliaRpc(toPeerId, message); // Conceptual
+    const rpcId = generateNodeId();
+    const message = { type: 'PING', id: this.dht.nodeId, rpcId };
+    console.log(`Kademlia: Sending PING via WebRTC to ${toPeerId}`);
+    
+    return this._sendRpcViaWebRTC(toPeerId, message, rpcId);
   }
 
   async sendFindNode(toPeerId, targetId) {
-    const message = { type: 'FIND_NODE', id: this.dht.nodeId, targetId, rpcId: generateNodeId() };
-    console.log(`Kademlia: Sending FIND_NODE to ${toPeerId} for target ${targetId}`);
-    return this.dht.transport.sendKademliaRpc(toPeerId, message); // Conceptual, returns Promise<contacts[]>
+    const rpcId = generateNodeId();
+    const message = { type: 'FIND_NODE', id: this.dht.nodeId, targetId, rpcId };
+    console.log(`Kademlia: Sending FIND_NODE via WebRTC to ${toPeerId} for target ${targetId}`);
+    
+    return this._sendRpcViaWebRTC(toPeerId, message, rpcId);
   }
 
   async sendFindValue(toPeerId, key) {
-    const message = { type: 'FIND_VALUE', id: this.dht.nodeId, key, rpcId: generateNodeId() };
-    console.log(`Kademlia: Sending FIND_VALUE to ${toPeerId} for key ${key}`);
-    return this.dht.transport.sendKademliaRpc(toPeerId, message); // Conceptual, returns Promise<{value?:any, contacts?:[]}>
+    const rpcId = generateNodeId();
+    const message = { type: 'FIND_VALUE', id: this.dht.nodeId, key, rpcId };
+    console.log(`Kademlia: Sending FIND_VALUE via WebRTC to ${toPeerId} for key ${key}`);
+    
+    return this._sendRpcViaWebRTC(toPeerId, message, rpcId);
   }
 
   async sendStore(toPeerId, key, value) {
-    const message = { type: 'STORE', id: this.dht.nodeId, key, value, rpcId: generateNodeId() };
-    console.log(`Kademlia: Sending STORE to ${toPeerId} for key ${key}`);
-    return this.dht.transport.sendKademliaRpc(toPeerId, message); // Conceptual, returns Promise<ack>
+    const rpcId = generateNodeId();
+    const message = { type: 'STORE', id: this.dht.nodeId, key, value, rpcId };
+    console.log(`Kademlia: Sending STORE via WebRTC to ${toPeerId} for key ${key}`);
+    
+    return this._sendRpcViaWebRTC(toPeerId, message, rpcId);
+  }
+
+  /**
+   * FIXED: Send RPC via direct WebRTC peer connection with shorter timeout and better debugging
+   * @param {string} toPeerId - Target peer ID
+   * @param {Object} message - RPC message
+   * @param {string} rpcId - RPC ID for tracking responses
+   * @returns {Promise} Promise that resolves with the response
+   */
+  async _sendRpcViaWebRTC(toPeerId, message, rpcId) {
+    if (!this.dht.peerManager) {
+      throw new Error('Kademlia: Peer manager not available for WebRTC communication');
+    }
+
+    // Check if we have a direct WebRTC connection to this peer
+    const peers = this.dht.peerManager.getPeers();
+    const peer = peers.get(toPeerId);
+    
+    if (!peer || !peer.connected) {
+      console.warn(`Kademlia: No direct WebRTC connection to ${toPeerId}, peer connected: ${peer?.connected}, peer exists: ${!!peer}`);
+      throw new Error(`No direct WebRTC connection to ${toPeerId}`);
+    }
+
+    console.log(`Kademlia: Peer ${toPeerId} is connected, sending RPC ${message.type} with ID ${rpcId}`);
+
+    // Create a promise to track the response
+    return new Promise((resolve, reject) => {
+      // Store the promise for when the response arrives
+      this.dht.pendingRpcs.set(rpcId, { resolve, reject });
+      
+      // FIXED: Shorter timeout for faster failure detection
+      const timeout = setTimeout(() => {
+        if (this.dht.pendingRpcs.has(rpcId)) {
+          this.dht.pendingRpcs.delete(rpcId);
+          console.warn(`Kademlia: RPC timeout for ${message.type} to ${toPeerId} (RPC ID: ${rpcId})`);
+          reject(new Error(`Kademlia RPC timeout for ${message.type} to ${toPeerId}`));
+        }
+      }, 5000); // FIXED: Reduced to 5 second timeout
+      
+      // Update the stored promise to clear timeout on resolve
+      const originalResolve = resolve;
+      this.dht.pendingRpcs.set(rpcId, { 
+        resolve: (value) => {
+          clearTimeout(timeout);
+          console.log(`Kademlia: RPC ${rpcId} resolved successfully`);
+          originalResolve(value);
+        }, 
+        reject: (error) => {
+          clearTimeout(timeout);
+          console.warn(`Kademlia: RPC ${rpcId} rejected:`, error.message);
+          reject(error);
+        }
+      });
+
+      // Send the RPC via direct WebRTC connection
+      try {
+        this.dht.peerManager.sendRawToPeer(toPeerId, {
+          type: 'kademlia_rpc',
+          message: message
+        });
+        console.log(`Kademlia: Sent ${message.type} via WebRTC to ${toPeerId} (RPC ID: ${rpcId})`);
+      } catch (error) {
+        clearTimeout(timeout);
+        this.dht.pendingRpcs.delete(rpcId);
+        console.error(`Kademlia: Failed to send RPC to ${toPeerId}:`, error);
+        reject(error);
+      }
+    });
   }
 
   // --- Methods to handle incoming RPCs ---
   // This method is called by KademliaDHT.handleIncomingRpc
   handleMessage(fromPeerId, message) {
-    console.log(`KademliaRPC: Handling message from ${fromPeerId}:`, message);
+    console.log(`KademliaRPC: Handling message from ${fromPeerId}:`, message.type, `(RPC ID: ${message.rpcId})`);
     switch (message.type) {
       case 'PING':
         return this.handlePing(fromPeerId, message);
@@ -426,13 +568,13 @@ class KademliaRPC {
   handlePing(fromPeerId, message) {
     console.log(`KademliaRPC: Received PING from ${fromPeerId} (RPC ID: ${message.rpcId})`);
     // Reply with PONG
-    // The transport needs to send this reply back to fromPeerId, associated with this request (e.g. using rpcId)
     return { type: 'PONG', id: this.dht.nodeId, inReplyTo: message.rpcId };
   }
 
   handleFindNode(fromPeerId, message) {
     console.log(`KademliaRPC: Received FIND_NODE from ${fromPeerId} for target ${message.targetId} (RPC ID: ${message.rpcId})`);
     const closest = this.dht.routingTable.findClosestContacts(message.targetId, this.dht.k);
+    console.log(`KademliaRPC: Returning ${closest.length} closest contacts for FIND_NODE`);
     // Reply with found contacts
     return { type: 'FIND_NODE_REPLY', id: this.dht.nodeId, contacts: closest, inReplyTo: message.rpcId };
   }
