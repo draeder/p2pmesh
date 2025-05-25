@@ -110,14 +110,6 @@ npm install
     ```
     You can run multiple instances of this script to simulate multiple Node.js peers. They will connect to the same signaling server and can interact with browser peers.
 
-4.  **Run the Signaling Optimization Demo:**
-
-    To see the signaling optimization in action:
-    ```bash
-    node examples/signaling-optimization-demo.js
-    ```
-    This demo creates multiple peers and shows how signaling is optimized to reduce server load.
-
 ## Signaling Server
 
 The included WebSocket signaling server provides production-ready features:
