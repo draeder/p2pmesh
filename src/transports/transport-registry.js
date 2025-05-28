@@ -80,11 +80,13 @@ class TransportRegistry {
 // Create a singleton instance
 const registry = new TransportRegistry();
 
-// Register the built-in WebSocket transport
+// Register the built-in transports
 import { WebSocketTransport } from './websocket-transport.js';
+import { WebTorrentTransport } from './webtorrent-transport.js';
 
 // Register all built-in transports
 registry.register('websocket', WebSocketTransport);
+registry.register('webtorrent', WebTorrentTransport);
 
 // Auto-register any additional transports that might be added in the future
 // This is a hook for module developers to register their transports
@@ -105,6 +107,11 @@ registry.createFromOptions = function(name, options = {}) {
   if (name === 'websocket') {
     // WebSocketTransport expects the signaling server URL as first parameter
     return this.create(name, options.signalingServerUrl || options.url);
+  }
+  
+  if (name === 'webtorrent') {
+    // WebTorrentTransport expects infoHash as first parameter
+    return this.create(name, options.infoHash || options.roomId, options);
   }
   
   // Default case: pass all options as arguments

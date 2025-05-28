@@ -1,16 +1,59 @@
 // examples/chat-node/app.js
 import { createMesh } from '../../src/index.js';
-// Named transport system is used instead of direct import
-// import { WebSocketTransport } from '../../src/transports/websocket-transport.js';
+import { generateDeterministicRoomId } from '../../src/utils/room-id-generator.js';
 import readline from 'readline';
 
-const signalingServerUrl = 'ws://localhost:8080';
+// Parse command line arguments
+const args = process.argv.slice(2);
+let transport = 'websocket';
+let signalingServerUrl = 'ws://localhost:8080';
+let roomName = 'default-room';
+
+// Parse command line options
+for (let i = 0; i < args.length; i++) {
+  switch (args[i]) {
+    case '--transport':
+    case '-t':
+      transport = args[++i];
+      break;
+    case '--server':
+    case '-s':
+      signalingServerUrl = args[++i];
+      break;
+    case '--room':
+    case '-r':
+      roomName = args[++i];
+      break;
+    case '--help':
+    case '-h':
+      console.log('P2PMesh Node.js Chat Example');
+      console.log('');
+      console.log('Options:');
+      console.log('  -t, --transport <transport>  Transport type: websocket or webtorrent (default: websocket)');
+      console.log('  -s, --server <url>          WebSocket signaling server URL (default: ws://localhost:8080)');
+      console.log('  -r, --room <name>           Room name for WebTorrent transport (default: default-room)');
+      console.log('  -h, --help                  Show this help message');
+      console.log('');
+      console.log('Examples:');
+      console.log('  node app.js                                    # Use WebSocket transport');
+      console.log('  node app.js --transport webtorrent             # Use WebTorrent transport');
+      console.log('  node app.js --transport webtorrent --room test # Use WebTorrent with custom room');
+      console.log('  node app.js --server ws://localhost:9090       # Use custom WebSocket server');
+      process.exit(0);
+  }
+}
+
 let mesh;
 
 // Set to track disconnected peers to prevent duplicate disconnect messages
 const disconnectedPeers = new Set();
 
-console.log(`Node.js P2PMesh Example - Starting...`);
+console.log(`Node.js P2PMesh Example - Starting with ${transport} transport...`);
+if (transport === 'webtorrent') {
+  console.log(`Room: ${roomName}`);
+} else {
+  console.log(`Signaling Server: ${signalingServerUrl}`);
+}
 
 // Create readline interface
 const rl = readline.createInterface({
@@ -21,25 +64,38 @@ const rl = readline.createInterface({
 
 async function main() {
   try {
-    console.log(`Connecting to signaling server ${signalingServerUrl}...`);
+    let meshConfig;
     
-    // Using named transport system
-    console.log(`Connecting to signaling server ${signalingServerUrl} using named transport...`);
+    if (transport === 'websocket') {
+      console.log(`Connecting to signaling server ${signalingServerUrl} using WebSocket transport...`);
+      
+      meshConfig = {
+        transportName: 'websocket',
+        transportOptions: {
+          signalingServerUrl: signalingServerUrl
+        },
+        maxPeers: 3,
+        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+      };
+    } else if (transport === 'webtorrent') {
+      console.log(`Generating room ID for "${roomName}"...`);
+      
+      // Generate deterministic room ID from room name
+      const roomId = await generateDeterministicRoomId(roomName);
+      console.log(`Connecting to WebTorrent swarm: ${roomId.substring(0, 8)}...`);
+      
+      meshConfig = {
+        transportName: 'webtorrent',
+        transportOptions: {
+          infoHash: roomId
+        },
+        maxPeers: 10 // WebTorrent can handle more peers
+      };
+    } else {
+      throw new Error(`Unsupported transport: ${transport}. Use 'websocket' or 'webtorrent'.`);
+    }
     
-    // Using named transport (recommended method)
-    // No need to import WebSocketTransport when using named transport
-    // The transport will be created internally based on the name
-    
-    // Properly await the createMesh function to ensure it's fully initialized
-    mesh = await createMesh({
-      // Removed peerId parameter to let the library handle ID generation
-      transportName: 'websocket',
-      transportOptions: {
-        signalingServerUrl: signalingServerUrl
-      },
-      maxPeers: 3, // Keep at 3 for testing as requested
-      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] // Public STUN server
-    });
+    mesh = await createMesh(meshConfig);
     
     // Note: Event handlers like 'open', 'close', and 'error' are handled internally
     // by the named transport system. The mesh object will still emit appropriate events.

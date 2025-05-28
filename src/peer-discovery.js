@@ -9,6 +9,7 @@ export class PeerDiscovery {
     this.localPeerId = options.localPeerId;
     this.kademlia = options.kademlia;
     this.peerManager = options.peerManager;
+    this.transport = options.transport;
     this.maxPeers = options.maxPeers || 5;
     this.eventHandlers = options.eventHandlers || {};
     
@@ -233,7 +234,7 @@ export class PeerDiscovery {
       console.log(`PEER-DISCOVERY: Starting discovery attempt ${this.discoveryAttempts} (next backoff: ${this.discoveryBackoff}ms)`);
 
       // ENHANCED: Get peers from multiple sources for better diversity
-      const potentialPeers = this.gatherPotentialPeers();
+      const potentialPeers = await this.gatherPotentialPeers();
 
       console.log(`PEER-DISCOVERY: Found ${potentialPeers.length} potential peers from all sources`);
 
@@ -284,9 +285,9 @@ export class PeerDiscovery {
 
   /**
    * ENHANCED: Gather potential peers from multiple sources
-   * @returns {Array} Array of potential peer objects with metadata
+   * @returns {Promise<Array>} Array of potential peer objects with metadata
    */
-  gatherPotentialPeers() {
+  async gatherPotentialPeers() {
     const potentialPeers = new Map();
     const connectedPeers = this.peerManager.getPeers();
     const pendingConnections = this.peerManager.pendingConnections;
@@ -324,6 +325,35 @@ export class PeerDiscovery {
           failureCount: 0,
           priority: 0.8
         });
+      }
+    }
+
+    // Source 3: Transport-level peer discovery
+    if (this.transport && typeof this.transport.discoverPeers === 'function') {
+      try {
+        console.log('PEER-DISCOVERY: Attempting transport-level peer discovery...');
+        const transportDiscoveredPeers = await this.transport.discoverPeers();
+        
+        if (transportDiscoveredPeers && Array.isArray(transportDiscoveredPeers)) {
+          console.log(`PEER-DISCOVERY: Transport discovered ${transportDiscoveredPeers.length} peers`);
+          
+          for (const peerId of transportDiscoveredPeers) {
+            if (peerId !== this.localPeerId && 
+                !connectedPeers.has(peerId) && 
+                !pendingConnections.has(peerId) &&
+                !potentialPeers.has(peerId)) {
+              potentialPeers.set(peerId, {
+                id: peerId,
+                source: 'transport',
+                lastSeen: Date.now(),
+                failureCount: 0,
+                priority: 0.9 // High priority for fresh transport discoveries
+              });
+            }
+          }
+        }
+      } catch (error) {
+        console.warn('PEER-DISCOVERY: Transport peer discovery failed:', error.message);
       }
     }
 

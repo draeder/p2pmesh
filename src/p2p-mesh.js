@@ -43,6 +43,18 @@ export class P2PMesh {
 
     console.log(`Initializing P2PMesh with ID: ${this.localPeerId}`);
 
+    // ENHANCED: For WebTorrent transport, connect first to get the transport's peer ID
+    if (this.transportInstance.constructor.name === 'WebTorrentTransport') {
+      console.log('Detected WebTorrent transport, connecting to get transport peer ID...');
+      await this.transportInstance.connect(this.localPeerId);
+      
+      // Use WebTorrent's peer ID instead of the generated one
+      if (this.transportInstance.localPeerId) {
+        console.log(`Using WebTorrent peer ID: ${this.transportInstance.localPeerId} instead of generated ID: ${this.localPeerId}`);
+        this.localPeerId = this.transportInstance.localPeerId;
+      }
+    }
+
     // FIXED: Initialize Kademlia DHT (transport only for initial bootstrapping)
     this.kademliaInstance = new KademliaDHT(this.localPeerId, this.transportInstance, { k: this.kademliaK });
 
@@ -86,6 +98,7 @@ export class P2PMesh {
       localPeerId: this.localPeerId,
       kademlia: this.kademliaInstance,
       peerManager: this.peerManager,
+      transport: this.transportInstance,
       maxPeers: this.maxPeers,
       eventHandlers: this.eventHandlers
     });
@@ -150,6 +163,31 @@ export class P2PMesh {
           await this.kademliaInstance.bootstrap(formattedPeers);
           // Optionally, try to connect to some of these new peers immediately
           // await this.peerDiscovery.findAndConnectPeers(); // Be cautious of calling this too often or in loops
+        }
+      });
+
+      // Listen for peer discovery events from transport (e.g., WebTorrent DHT discoveries)
+      this.transportInstance.on('peer_joined', async ({ peerId }) => {
+        if (peerId && peerId !== this.localPeerId) {
+          console.log(`P2PMesh: Transport discovered new peer: ${peerId}`);
+          
+          // Add to Kademlia routing table
+          await this.kademliaInstance.bootstrap([{ id: peerId, address: peerId }]);
+          
+          // Try to establish a WebRTC connection if we're under the maxPeers limit
+          const currentPeerCount = this.peerManager.getPeerCount();
+          if (currentPeerCount < this.maxPeers) {
+            console.log(`P2PMesh: Attempting to connect to discovered peer ${peerId} (${currentPeerCount}/${this.maxPeers})`);
+            try {
+              // Use deterministic initiator selection
+              const shouldBeInitiator = this.localPeerId < peerId;
+              await this.peerManager.requestConnection(peerId, shouldBeInitiator);
+            } catch (error) {
+              console.warn(`P2PMesh: Failed to connect to discovered peer ${peerId}:`, error.message);
+            }
+          } else {
+            console.log(`P2PMesh: Not connecting to discovered peer ${peerId} - at maxPeers limit (${currentPeerCount}/${this.maxPeers})`);
+          }
         }
       });
 

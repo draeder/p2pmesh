@@ -1,7 +1,6 @@
 // examples/chat-browser/app.js
 import { createMesh } from '../../src/index.js';
-// Named transport system is used instead of direct import
-// import { WebSocketTransport } from '../../src/transports/websocket-transport.js';
+import { generateDeterministicRoomId } from '../../src/utils/room-id-generator.js';
 
 document.addEventListener('DOMContentLoaded', () => {
   const myPeerIdEl = document.getElementById('myPeerId');
@@ -10,12 +9,33 @@ document.addEventListener('DOMContentLoaded', () => {
   const messageForm = document.getElementById('messageForm');
   const messageInput = document.getElementById('messageInput');
   const connectedPeersEl = document.getElementById('connectedPeers');
+  const peersSection = document.getElementById('peersSection');
+  
+  // Settings panel elements
+  const transportSelect = document.getElementById('transportSelect');
+  const signalingUrl = document.getElementById('signalingUrl');
+  const roomName = document.getElementById('roomName');
+  const websocketSettings = document.getElementById('websocketSettings');
+  const webtorrentSettings = document.getElementById('webtorrentSettings');
+  const connectBtn = document.getElementById('connectBtn');
+  const disconnectBtn = document.getElementById('disconnectBtn');
 
-  const signalingServerUrl = 'ws://localhost:8080';
   let mesh;
   
   // Set to track disconnected peers to prevent duplicate disconnect messages
   const disconnectedPeers = new Set();
+
+  // Handle transport selection UI
+  transportSelect.addEventListener('change', () => {
+    const selectedTransport = transportSelect.value;
+    if (selectedTransport === 'websocket') {
+      websocketSettings.style.display = 'block';
+      webtorrentSettings.style.display = 'none';
+    } else if (selectedTransport === 'webtorrent') {
+      websocketSettings.style.display = 'none';
+      webtorrentSettings.style.display = 'block';
+    }
+  });
 
   myPeerIdEl.textContent = 'Initializing ID...';
   statusEl.textContent = 'Status: Initializing...';
@@ -49,29 +69,59 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  async function initMesh() {
+    async function initMesh() {
     try {
-      statusEl.textContent = `Status: Connecting to signaling server ${signalingServerUrl}...`;
-      // Using named transport system
-      statusEl.textContent = `Status: Connecting to signaling server ${signalingServerUrl}...`;
+      const selectedTransport = transportSelect.value;
+      let meshConfig;
       
-      // Using named transport (recommended method)
-      // No need to import WebSocketTransport when using named transport
-      // The transport will be created internally based on the name
+      if (selectedTransport === 'websocket') {
+        const serverUrl = signalingUrl.value.trim();
+        if (!serverUrl) {
+          throw new Error('Please enter a signaling server URL');
+        }
+        
+        statusEl.textContent = `Status: Connecting to signaling server ${serverUrl}...`;
+        
+        meshConfig = {
+          transportName: 'websocket',
+          transportOptions: {
+            signalingServerUrl: serverUrl
+          },
+          maxPeers: 3,
+          iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+        };
+      } else if (selectedTransport === 'webtorrent') {
+        const roomNameValue = roomName.value.trim();
+        if (!roomNameValue) {
+          throw new Error('Please enter a room name');
+        }
+        
+        statusEl.textContent = `Status: Generating room ID for "${roomNameValue}"...`;
+        
+        // Generate deterministic room ID from room name
+        const roomId = await generateDeterministicRoomId(roomNameValue);
+        statusEl.textContent = `Status: Connecting to WebTorrent swarm (${roomId.substring(0, 8)}...)...`;
+        
+        meshConfig = {
+          transportName: 'webtorrent',
+          transportOptions: {
+            infoHash: roomId
+          },
+          maxPeers: 10 // WebTorrent can handle more peers
+        };
+      }
       
-      mesh = await createMesh({
-        transportName: 'websocket',
-        transportOptions: {
-          signalingServerUrl: signalingServerUrl
-        },
-        maxPeers: 3, // Keep at 3 for testing as requested
-        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-      });
+      mesh = await createMesh(meshConfig);
       
-      // Note: Event handlers like 'open', 'close', and 'error' are handled internally
-      // by the named transport system. The mesh object will still emit appropriate events.
-
+      // Update UI state
       myPeerIdEl.textContent = mesh.peerId;
+      connectBtn.style.display = 'none';
+      disconnectBtn.style.display = 'inline-block';
+      messageForm.style.display = 'flex';
+      peersSection.style.display = 'block';
+      transportSelect.disabled = true;
+      signalingUrl.disabled = true;
+      roomName.disabled = true;
 
       mesh.on('peer:connect', (peerId) => {
         addMessage(`Connected to peer: ${peerId}`, 'system');
@@ -248,6 +298,40 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
+  async function disconnectMesh() {
+    if (mesh) {
+      try {
+        await mesh.leave();
+        mesh = null;
+        
+        // Reset UI state
+        myPeerIdEl.textContent = 'Not connected';
+        statusEl.textContent = 'Status: Disconnected';
+        connectBtn.style.display = 'inline-block';
+        disconnectBtn.style.display = 'none';
+        messageForm.style.display = 'none';
+        peersSection.style.display = 'none';
+        transportSelect.disabled = false;
+        signalingUrl.disabled = false;
+        roomName.disabled = false;
+        
+        // Clear peers list
+        connectedPeersEl.innerHTML = '';
+        disconnectedPeers.clear();
+        
+        addMessage('Disconnected from mesh', 'system');
+      } catch (error) {
+        console.error('Error disconnecting:', error);
+        statusEl.textContent = 'Status: Error disconnecting';
+        addMessage(`Disconnect error: ${error.message}`, 'system');
+      }
+    }
+  }
+
+  // Button event listeners
+  connectBtn.addEventListener('click', initMesh);
+  disconnectBtn.addEventListener('click', disconnectMesh);
+
   messageForm.addEventListener('submit', (event) => {
     event.preventDefault();
     const messageText = messageInput.value.trim();
@@ -260,6 +344,10 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  initMesh();
-  setInterval(updateConnectedPeersList, 3000);
+  // Auto-update peers list when connected
+  setInterval(() => {
+    if (mesh) {
+      updateConnectedPeersList();
+    }
+  }, 3000);
 });

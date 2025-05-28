@@ -23,19 +23,47 @@
 <body>
     <div id="chatContainer">
         <h2>P2PMesh Chat</h2>
-        <div id="peerIdDisplay">Your Peer ID: <span id="myPeerId">Connecting...</span></div>
-        <div id="status">Status: Initializing...</div>
+        
+        <div id="settingsPanel" style="margin-bottom: 20px; padding: 15px; background-color: #f0f0f0; border-radius: 5px;">
+            <h3>Connection Settings</h3>
+            <div style="margin-bottom: 10px;">
+                <label for="transportSelect">Transport:</label>
+                <select id="transportSelect" style="margin-left: 10px; padding: 5px;">
+                    <option value="websocket">WebSocket</option>
+                    <option value="webtorrent">WebTorrent</option>
+                </select>
+            </div>
+            
+            <div id="websocketSettings" style="margin-bottom: 10px;">
+                <label for="signalingUrl">Signaling Server URL:</label>
+                <input type="text" id="signalingUrl" value="ws://localhost:8080" style="margin-left: 10px; padding: 5px; width: 200px;" />
+            </div>
+            
+            <div id="webtorrentSettings" style="margin-bottom: 10px; display: none;">
+                <label for="roomName">Room Name:</label>
+                <input type="text" id="roomName" value="default-room" style="margin-left: 10px; padding: 5px; width: 200px;" />
+                <small style="display: block; color: #666; margin-top: 5px;">Room name will be converted to a SHA1 hash for the WebTorrent swarm</small>
+            </div>
+            
+            <button id="connectBtn" style="padding: 8px 16px; background-color: #28a745; color: white; border: none; border-radius: 4px; cursor: pointer;">Connect</button>
+            <button id="disconnectBtn" style="padding: 8px 16px; background-color: #dc3545; color: white; border: none; border-radius: 4px; cursor: pointer; display: none;">Disconnect</button>
+        </div>
+        
+        <div id="peerIdDisplay">Your Peer ID: <span id="myPeerId">Not connected</span></div>
+        <div id="status">Status: Ready to connect...</div>
         <ul id="messages"></ul>
-        <form id="messageForm">
+        <form id="messageForm" style="display: none;">
             <input type="text" id="messageInput" placeholder="Type a message..." autocomplete="off" />
             <button type="submit">Send</button>
         </form>
-        <div>
+        <div id="peersSection" style="display: none;">
             <h3>Connected Peers:</h3>
             <ul id="connectedPeers"></ul>
         </div>
     </div>
 
+    <!-- WebTorrent CDN for browser support -->
+    <script src="https://cdn.jsdelivr.net/npm/webtorrent@latest/webtorrent.min.js"></script>
     <script type="module" src="app.js"></script>
 </body>
 </html>
