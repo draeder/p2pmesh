@@ -693,53 +693,51 @@ export class WebTorrentTransport extends AbstractTransport {
       
       // Create a proper WebTorrent extension constructor
       const self = this;
-      function P2PMeshExtension(wire) {
-        // Handle incoming extension messages
-        this.onMessage = function(buf) {
-          try {
-            console.log(`WebTorrent: Raw buffer from ${remotePeerId}:`, buf, 'length:', buf.length);
-            
-            // Convert buffer to string with proper encoding
-            let messageStr;
-            if (typeof Buffer !== 'undefined' && Buffer.isBuffer(buf)) {
-              messageStr = buf.toString('utf8');
-            } else if (buf instanceof Uint8Array) {
-              messageStr = new TextDecoder('utf8').decode(buf);
-            } else {
-              messageStr = buf.toString();
+      function P2PMeshExtension(wire) {          // Handle incoming extension messages
+          this.onMessage = function(buf) {
+            try {
+              // Log receiving message without exposing content
+              console.log(`WebTorrent: Received raw extension message from ${remotePeerId}, length: ${buf?.length || 0} bytes`);
+              
+              // Convert buffer to string with proper encoding
+              let messageStr;
+              if (typeof Buffer !== 'undefined' && Buffer.isBuffer(buf)) {
+                messageStr = buf.toString('utf8');
+              } else if (buf instanceof Uint8Array) {
+                messageStr = new TextDecoder('utf8').decode(buf);
+              } else {
+                messageStr = buf.toString();
+              }
+              
+              // Clean up the message string - remove any null bytes or extra characters
+              messageStr = messageStr.trim().replace(/\0/g, '');
+              
+              // Find the JSON part if there are extra bytes
+              let jsonStart = messageStr.indexOf('{');
+              let jsonEnd = messageStr.lastIndexOf('}');
+              
+              if (jsonStart !== -1 && jsonEnd !== -1 && jsonEnd > jsonStart) {
+                messageStr = messageStr.substring(jsonStart, jsonEnd + 1);
+              }
+              
+              // Parse the message without logging the full content
+              const message = JSON.parse(messageStr);
+              console.log(`WebTorrent: Parsed extension message from ${remotePeerId}, type: ${message.type || 'unknown'}`);
+              self.handleP2PMeshMessage(remotePeerId, message);
+            } catch (error) {
+              console.error(`Failed to parse P2PMesh message from ${remotePeerId}:`, error.message);
+              // Don't log the raw buffer content to avoid leaking sensitive data
+              console.error(`Error occurred while processing a ${buf?.length || 0}-byte message`);
             }
-            
-            console.log(`WebTorrent: Message string from ${remotePeerId}:`, JSON.stringify(messageStr));
-            
-            // Clean up the message string - remove any null bytes or extra characters
-            messageStr = messageStr.trim().replace(/\0/g, '');
-            
-            // Find the JSON part if there are extra bytes
-            let jsonStart = messageStr.indexOf('{');
-            let jsonEnd = messageStr.lastIndexOf('}');
-            
-            if (jsonStart !== -1 && jsonEnd !== -1 && jsonEnd > jsonStart) {
-              messageStr = messageStr.substring(jsonStart, jsonEnd + 1);
-            }
-            
-            console.log(`WebTorrent: Cleaned message from ${remotePeerId}:`, JSON.stringify(messageStr));
-            
-            const message = JSON.parse(messageStr);
-            console.log(`WebTorrent: Parsed extension message from ${remotePeerId}:`, message.type);
-            self.handleP2PMeshMessage(remotePeerId, message);
-          } catch (error) {
-            console.error(`Failed to parse P2PMesh message from ${remotePeerId}:`, error);
-            console.error(`Raw buffer:`, buf);
-            console.error(`Buffer as hex:`, Array.from(buf).map(b => b.toString(16).padStart(2, '0')).join(' '));
-          }
-        };
+          };
         
         // Send method for the extension
         this.send = function(message) {
           try {
-            const messageText = JSON.stringify(message);
-            console.log(`WebTorrent: Sending extension message to ${remotePeerId}:`, message.type, 'JSON:', JSON.stringify(messageText));
+            // Log only the message type, not the full content
+            console.log(`WebTorrent: Sending extension message to ${remotePeerId}, type: ${message.type || 'unknown'}`);
             
+            const messageText = JSON.stringify(message);
             let messageBuffer;
             
             if (typeof Buffer !== 'undefined') {
@@ -749,13 +747,12 @@ export class WebTorrentTransport extends AbstractTransport {
               messageBuffer = encoder.encode(messageText);
             }
             
-            console.log(`WebTorrent: Message buffer for ${remotePeerId}:`, messageBuffer, 'length:', messageBuffer.length);
-            console.log(`WebTorrent: Buffer as hex:`, Array.from(messageBuffer).map(b => b.toString(16).padStart(2, '0')).join(' '));
+            console.log(`WebTorrent: Prepared message buffer for ${remotePeerId}, length: ${messageBuffer.length} bytes`);
             
             wire.extended(extensionName, messageBuffer);
-            console.log(`WebTorrent: Sent extension message to ${remotePeerId}:`, message.type);
+            console.log(`WebTorrent: Extension message sent to ${remotePeerId}`);
           } catch (error) {
-            console.error(`WebTorrent: Failed to send extension message:`, error);
+            console.error(`WebTorrent: Failed to send extension message:`, error.message);
           }
         };
       }
@@ -782,6 +779,9 @@ export class WebTorrentTransport extends AbstractTransport {
       wire._p2pmeshExtension = extensionName;
       wire._p2pmeshSend = (message) => {
         try {
+          // Log only the message type for privacy
+          console.log(`WebTorrent: Preparing to send message to ${remotePeerId}, type: ${message.type || 'unknown'}`);
+          
           const messageText = JSON.stringify(message);
           let messageBuffer;
           
@@ -795,12 +795,12 @@ export class WebTorrentTransport extends AbstractTransport {
           // Try to send via extension
           if (wire.extended) {
             wire.extended(extensionName, messageBuffer);
-            console.log(`WebTorrent: Sent extension message to ${remotePeerId}:`, message.type);
+            console.log(`WebTorrent: Extension message sent to ${remotePeerId}`);
           } else {
             console.warn(`WebTorrent: No extended method available for ${remotePeerId}`);
           }
         } catch (error) {
-          console.error(`WebTorrent: Failed to send extension message to ${remotePeerId}:`, error);
+          console.error(`WebTorrent: Failed to send extension message to ${remotePeerId}:`, error.message);
         }
       };
       
@@ -833,11 +833,12 @@ export class WebTorrentTransport extends AbstractTransport {
       wire.on('extended', (ext, buf) => {
         if (ext === extensionName || (typeof ext === 'number' && wire.peerExtendedMapping && wire.peerExtendedMapping[ext] === extensionName)) {
           try {
+            // Safely handle the message by parsing with minimal logging
             const message = JSON.parse(buf.toString());
-            console.log(`WebTorrent: Received fallback extension message from ${remotePeerId}:`, message.type);
+            console.log(`WebTorrent: Received fallback extension message from ${remotePeerId}, type: ${message.type || 'unknown'}`);
             this.handleP2PMeshMessage(remotePeerId, message);
           } catch (error) {
-            console.error(`Failed to parse P2PMesh message from ${remotePeerId}:`, error);
+            console.error(`Failed to parse P2PMesh message from ${remotePeerId}:`, error.message);
           }
         }
       });
@@ -884,7 +885,8 @@ export class WebTorrentTransport extends AbstractTransport {
    * Handles P2PMesh protocol messages received via WebTorrent
    */
   handleP2PMeshMessage(fromPeerId, message) {
-    console.log(`WebTorrent: Received P2PMesh message from ${fromPeerId}:`, message.type);
+    // Log only the message type and peer ID to avoid exposing sensitive message contents
+    console.log(`WebTorrent: Received P2PMesh message from ${fromPeerId}, type: ${message.type || 'unknown'}`);
 
     switch (message.type) {
       case 'hello':
@@ -917,6 +919,8 @@ export class WebTorrentTransport extends AbstractTransport {
         break;
 
       case 'kademlia_rpc':
+        // Process Kademlia RPC messages
+        console.log(`WebTorrent: Received Kademlia RPC from ${fromPeerId}, type: ${message.rpcMessage?.type || 'unknown'}`);
         this.emit('kademlia_rpc_message', {
           from: fromPeerId,
           rpcMessage: message.rpcMessage
@@ -924,11 +928,15 @@ export class WebTorrentTransport extends AbstractTransport {
         break;
 
       case 'kademlia_rpc_reply':
-        const rpcId = message.rpcMessage.inReplyTo;
-        if (this.pendingKademliaRpcs.has(rpcId)) {
+        // Process Kademlia RPC replies
+        console.log(`WebTorrent: Received Kademlia RPC reply from ${fromPeerId}`);
+        const rpcId = message.rpcMessage?.inReplyTo;
+        if (rpcId && this.pendingKademliaRpcs.has(rpcId)) {
           const { resolve } = this.pendingKademliaRpcs.get(rpcId);
           resolve(message.rpcMessage);
           this.pendingKademliaRpcs.delete(rpcId);
+        } else {
+          console.warn(`WebTorrent: Received Kademlia RPC reply with unknown or missing rpcId`);
         }
         break;
 
@@ -1022,7 +1030,8 @@ export class WebTorrentTransport extends AbstractTransport {
     }
 
     try {
-      console.log(`WebTorrent: Sending message to ${toPeerId}:`, message.type);
+      // Log only the message type for privacy
+      console.log(`WebTorrent: Sending message to ${toPeerId}, type: ${message.type || 'unknown'}`);
       
       // Use the improved extension sender if available
       if (wire._p2pmeshSend) {
@@ -1046,7 +1055,7 @@ export class WebTorrentTransport extends AbstractTransport {
       // Send via BitTorrent extended protocol
       if (wire._p2pmeshExtension && wire.extended) {
         wire.extended(wire._p2pmeshExtension, messageBuffer);
-        console.log(`WebTorrent: Sent fallback extension message to ${toPeerId}:`, message.type);
+        console.log(`WebTorrent: Sent fallback extension message to ${toPeerId}, type: ${message.type || 'unknown'}`);
         return true;
       } else {
         console.warn(`WebTorrent: P2PMesh extension not available for peer ${toPeerId}`);
@@ -1092,7 +1101,15 @@ export class WebTorrentTransport extends AbstractTransport {
         }
       };
 
-      this.send(toPeerId, message);
+      // Log sending RPC but avoid exposing the full message content
+      console.log(`WebTorrent: Sending Kademlia RPC to ${toPeerId}, type: ${kademliaRpcMessage.type || 'unknown'}, rpcId: ${rpcId}`);
+      
+      const sent = this.send(toPeerId, message);
+      if (!sent) {
+        clearTimeout(timeout);
+        this.pendingKademliaRpcs.delete(rpcId);
+        reject(new Error(`Failed to send Kademlia RPC to peer ${toPeerId}`));
+      }
     });
   }
 
