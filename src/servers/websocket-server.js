@@ -1,5 +1,5 @@
 // src/servers/websocket-server.js
-import { WebSocketServer } from 'ws';
+import { WebSocketServer,WebSocket } from 'ws';
 // Import Kademlia utilities from the parent directory
 import { calculateDistance, K as KADEMLIA_K } from '../kademlia.js';
 
