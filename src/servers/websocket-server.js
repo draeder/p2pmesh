@@ -1,7 +1,18 @@
 // src/servers/websocket-server.js
 import { WebSocketServer,WebSocket } from 'ws';
-// Import Kademlia utilities from the parent directory
-import { calculateDistance, K as KADEMLIA_K } from '../kademlia.js';
+
+// Minimal XOR distance calculator for peer selection
+function calculateXorDistance(id1, id2) {
+  // Convert hex strings to BigInt for XOR calculation
+  try {
+    const bigInt1 = BigInt('0x' + id1);
+    const bigInt2 = BigInt('0x' + id2);
+    return bigInt1 ^ bigInt2;
+  } catch (e) {
+    // Fallback: use simple string comparison if BigInt fails
+    return Math.abs(id1.localeCompare(id2));
+  }
+}
 
 const wss = new WebSocketServer({ port: 8080 });
 
@@ -52,8 +63,8 @@ wss.on('connection', (ws) => {
           if (otherPeers.length > 0) {
             try {
               otherPeers.sort((a, b) => {
-                const distA = calculateDistance(currentPeerId, a.id);
-                const distB = calculateDistance(currentPeerId, b.id);
+                const distA = calculateXorDistance(currentPeerId, a.id);
+                const distB = calculateXorDistance(currentPeerId, b.id);
                 return distA < distB ? -1 : (distA > distB ? 1 : 0);
               });
               
