@@ -9,59 +9,81 @@ terraform {
       source  = "hashicorp/null"
       version = "~> 3.0"
     }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.0"
+    }
+    archive = {
+      source  = "hashicorp/archive"
+      version = "~> 2.0"
+    }
   }
 }
 
 provider "aws" {
   region = var.aws_region
-  # Uses CLI credentials automatically
 }
 
 # Data sources
 data "aws_caller_identity" "current" {}
 
-# Automated Lambda packaging (cross-platform)
-resource "null_resource" "lambda_package" {
-  triggers = {
-    # Trigger rebuild when source files change (only if they exist)
-    lambda_source = fileexists("${path.module}/lambda/index.js") ? filemd5("${path.module}/lambda/index.js") : "missing"
-    package_json  = fileexists("${path.module}/lambda/package.json") ? filemd5("${path.module}/lambda/package.json") : "missing"
-    always_run    = timestamp() # Force run to create files if missing
-  }
+# Local values for cross-platform detection
+locals {
+  is_windows = substr(pathexpand("~"), 0, 1) == "/" ? false : true
+}
 
-  provisioner "local-exec" {
-    working_dir = path.module
-    
-    # Cross-platform commands to create lambda directory and files if missing
-    command = <<-EOT
-      ${local.is_windows ? "powershell -Command" : "/bin/bash -c"} "
-        ${local.is_windows ? 
-          "if (!(Test-Path lambda)) { New-Item -ItemType Directory -Path lambda }" :
-          "mkdir -p lambda"
-        }
-      "
-    EOT
+# Install Lambda dependencies
+resource "null_resource" "lambda_dependencies" {
+  triggers = {
+    package_json = fileexists("${path.module}/lambda/package.json") ? filemd5("${path.module}/lambda/package.json") : "missing"
   }
 
   provisioner "local-exec" {
     working_dir = "${path.module}/lambda"
     
-    # Cross-platform commands for packaging
     command = <<-EOT
       ${local.is_windows ? "powershell -Command" : "/bin/bash -c"} "
-        ${local.is_windows ? "if (!(Test-Path node_modules)) { npm install }" : "[ ! -d node_modules ] && npm install || true"}
-        ${local.is_windows ? 
-          "Compress-Archive -Path index.js,package.json,node_modules -DestinationPath signaling-server.zip -Force" :
-          "zip -r signaling-server.zip index.js package.json node_modules/"
-        }
+        ${local.is_windows ? "npm install --production" : "npm install --production"}
       "
     EOT
   }
 }
 
-# Local values for cross-platform detection
-locals {
-  is_windows = substr(pathexpand("~"), 0, 1) == "/" ? false : true
+# Create Lambda deployment package
+data "archive_file" "lambda_zip" {
+  type        = "zip"
+  output_path = "${path.module}/lambda/signaling-server.zip"
+  
+  source_dir = "${path.module}/lambda"
+  excludes = [
+    "signaling-server.zip",
+    ".gitkeep"
+  ]
+  
+  depends_on = [null_resource.lambda_dependencies]
+}
+
+# DynamoDB table for connection state
+resource "aws_dynamodb_table" "connections" {
+  name           = "${var.project_name}-connections-${var.stage}"
+  billing_mode   = "PAY_PER_REQUEST"
+  hash_key       = "connectionId"
+
+  attribute {
+    name = "connectionId"
+    type = "S"
+  }
+
+  ttl {
+    attribute_name = "ttl"
+    enabled        = true
+  }
+
+  tags = {
+    Name        = "${var.project_name}-connections-${var.stage}"
+    Environment = var.stage
+    Project     = var.project_name
+  }
 }
 
 # S3 bucket for Lambda deployment package
@@ -92,7 +114,7 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "lambda_deployment
 
 # Lambda function
 resource "aws_lambda_function" "signaling_server" {
-  filename         = "${path.module}/lambda/signaling-server.zip"
+  filename         = data.archive_file.lambda_zip.output_path
   function_name    = "${var.project_name}-${var.stage}"
   role            = aws_iam_role.lambda_role.arn
   handler         = "index.handler"
@@ -100,19 +122,20 @@ resource "aws_lambda_function" "signaling_server" {
   timeout         = var.lambda_timeout
   memory_size     = var.lambda_memory_size
 
-  source_code_hash = fileexists("${path.module}/lambda/signaling-server.zip") ? filebase64sha256("${path.module}/lambda/signaling-server.zip") : null
+  source_code_hash = data.archive_file.lambda_zip.output_base64sha256
 
   environment {
     variables = {
-      STAGE = var.stage
-      REGION = var.aws_region
+      STAGE             = var.stage
+      REGION            = var.aws_region
+      CONNECTIONS_TABLE = aws_dynamodb_table.connections.name
     }
   }
 
   depends_on = [
     aws_iam_role_policy_attachment.lambda_basic,
+    aws_iam_role_policy.lambda_dynamodb,
     aws_cloudwatch_log_group.lambda_logs,
-    null_resource.lambda_package,
   ]
 }
 
@@ -165,14 +188,41 @@ resource "aws_iam_role_policy" "lambda_apigateway" {
   })
 }
 
+# Additional policy for DynamoDB access
+resource "aws_iam_role_policy" "lambda_dynamodb" {
+  name = "${var.project_name}-lambda-dynamodb-policy-${var.stage}"
+  role = aws_iam_role.lambda_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "dynamodb:GetItem",
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem",
+          "dynamodb:DeleteItem",
+          "dynamodb:Scan",
+          "dynamodb:Query"
+        ]
+        Resource = aws_dynamodb_table.connections.arn
+      }
+    ]
+  })
+}
+
 # API Gateway v2 (WebSocket)
 resource "aws_apigatewayv2_api" "websocket_api" {
   name                       = "${var.project_name}-websocket-${var.stage}"
   protocol_type             = "WEBSOCKET"
   route_selection_expression = "$request.body.action"
 
-  # Note: CORS is not supported for WebSocket APIs
-  # CORS handling for WebSocket must be done at the application level
+  tags = {
+    Name        = "${var.project_name}-websocket-${var.stage}"
+    Environment = var.stage
+    Project     = var.project_name
+  }
 }
 
 # Lambda permission for API Gateway
@@ -230,7 +280,7 @@ resource "aws_apigatewayv2_stage" "websocket_stage" {
   api_id        = aws_apigatewayv2_api.websocket_api.id
   deployment_id = aws_apigatewayv2_deployment.websocket_deployment.id
   name          = var.stage
-  auto_deploy   = true
+  auto_deploy   = false
 
   default_route_settings {
     throttling_rate_limit  = 1000
@@ -240,8 +290,13 @@ resource "aws_apigatewayv2_stage" "websocket_stage" {
 
 # Outputs
 output "websocket_url" {
-  description = "WebSocket API Gateway URL"
-  value       = "${aws_apigatewayv2_api.websocket_api.api_endpoint}/${var.stage}"
+  description = "WebSocket API Gateway URL with WSS protocol"
+  value       = "wss://${aws_apigatewayv2_api.websocket_api.id}.execute-api.${var.aws_region}.amazonaws.com/${var.stage}"
+}
+
+output "websocket_api_endpoint" {
+  description = "API Gateway WebSocket endpoint (without protocol)"
+  value       = "${aws_apigatewayv2_api.websocket_api.id}.execute-api.${var.aws_region}.amazonaws.com/${var.stage}"
 }
 
 output "lambda_function_name" {
@@ -252,4 +307,36 @@ output "lambda_function_name" {
 output "api_gateway_id" {
   description = "API Gateway ID"
   value       = aws_apigatewayv2_api.websocket_api.id
+}
+
+output "dynamodb_table_name" {
+  description = "DynamoDB connections table name"
+  value       = aws_dynamodb_table.connections.name
+}
+
+output "aws_region" {
+  description = "AWS region used for deployment"
+  value       = var.aws_region
+}
+
+output "project_name" {
+  description = "Project name used for resource naming"
+  value       = var.project_name
+}
+
+output "stage" {
+  description = "Deployment stage"
+  value       = var.stage
+}
+
+output "deployment_info" {
+  description = "Complete deployment information"
+  value = {
+    websocket_url     = "wss://${aws_apigatewayv2_api.websocket_api.id}.execute-api.${var.aws_region}.amazonaws.com/${var.stage}"
+    lambda_function   = aws_lambda_function.signaling_server.function_name
+    dynamodb_table    = aws_dynamodb_table.connections.name
+    region           = var.aws_region
+    stage            = var.stage
+    timestamp        = timestamp()
+  }
 }
