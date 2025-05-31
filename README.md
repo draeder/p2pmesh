@@ -24,7 +24,11 @@ This project provides a foundational library for creating peer-to-peer mesh netw
 ```
 p2pmesh/
 ├── docs/
-│   └── named-transports.md         # Documentation for named transport system
+│   ├── transports/
+│   │   └── named-transports.md         # Documentation for named transport system
+│   └── terraform/
+│       └── aws/
+│           └── README.md               # AWS deployment documentation
 ├── examples/
 │   ├── chat-browser/                # Browser-based chat application example
 │   │   ├── app.js
@@ -46,9 +50,11 @@ p2pmesh/
 │   ├── servers/
 │   │   └── websocket-server.js      # Production WebSocket signaling server
 │   ├── transports/
+│   │   ├── aws-websocket-transport.js # AWS WebSocket transport
 │   │   ├── transport-interface.js   # Abstract transport interface
 │   │   ├── transport-registry.js    # Named transport registry system
-│   │   └── websocket-transport.js   # WebSocket transport implementation
+│   │   ├── websocket-transport.js   # WebSocket transport implementation
+│   │   └── webtorrent-transport.js  # WebTorrent transport implementation
 │   ├── utils/
 │   │   ├── peer-id-generator.js     # Secure peer ID generation
 │   │   └── simple-peer-loader.js    # Cross-platform SimplePeer loading
@@ -59,6 +65,12 @@ p2pmesh/
 │   ├── peer-discovery.js            # Peer discovery and connection strategies
 │   ├── peer-manager.js              # Peer connection manager
 │   └── signaling-optimizer.js       # Signaling optimization system
+├── terraform/
+│   └── aws/                         # AWS deployment infrastructure
+│       ├── lambda/                  # Lambda function code
+│       ├── main.tf                  # Terraform configuration
+│       ├── variables.tf             # Terraform variables
+│       └── deploy.sh                # Deployment script
 ├── .gitignore
 ├── LICENSE
 ├── package.json
