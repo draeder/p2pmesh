@@ -46,6 +46,7 @@ class RoutingTable {
   constructor(localNodeId) {
     this.localNodeId = localNodeId;
     this.buckets = Array.from({ length: ID_LENGTH }, () => []); // One bucket for each bit position
+    this.dht = null; // Reference to parent DHT instance for connection checking
   }
 
   /**
@@ -322,13 +323,39 @@ class KademliaDHT {
         let newNodesFoundInRound = false;
 
         // Select alpha nodes that haven't been queried yet
-        const currentBatchToQuery = nodesToQuery
-            .filter(n => !queried.has(n.id))
-            .slice(0, this.alpha);
+        // If we have a peer manager, prefer nodes with WebRTC connections
+        let candidateNodes = nodesToQuery.filter(n => !queried.has(n.id));
+        
+        if (this.peerManager) {
+          const peers = this.peerManager.getPeers();
+          const nodesWithConnections = candidateNodes.filter(n => {
+            const peer = peers.get(n.id);
+            return peer && peer.connected;
+          });
+          
+          // If we have nodes with active connections, use only those
+          // Otherwise, use all candidate nodes (for initial bootstrap)
+          if (nodesWithConnections.length > 0) {
+            candidateNodes = nodesWithConnections;
+            console.log(`Kademlia: Found ${nodesWithConnections.length} nodes with active WebRTC connections`);
+          } else {
+            console.log(`Kademlia: No active WebRTC connections, using all ${candidateNodes.length} candidate nodes`);
+          }
+        } else {
+          console.log(`Kademlia: No peer manager available, using all ${candidateNodes.length} candidate nodes`);
+        }
+        
+        const currentBatchToQuery = candidateNodes.slice(0, this.alpha);
 
         if (currentBatchToQuery.length === 0) {
-            console.log('Kademlia: FIND_NODE - No new nodes to query in this batch.');
-            break; // No more unqueried nodes in the current closest set
+            // Check if we have any nodes in routing table but no WebRTC connections
+            const unqueriedNodes = nodesToQuery.filter(n => !queried.has(n.id));
+            if (unqueriedNodes.length > 0) {
+              console.log(`Kademlia: FIND_NODE - ${unqueriedNodes.length} nodes available but no WebRTC connections established yet. Waiting for connections...`);
+            } else {
+              console.log('Kademlia: FIND_NODE - No new nodes to query in this batch.');
+            }
+            break; // No more unqueried nodes with active connections
         }
 
         for (const contact of currentBatchToQuery) {
@@ -580,7 +607,7 @@ class KademliaRPC {
     const peer = peers.get(toPeerId);
     
     if (!peer || !peer.connected) {
-      console.warn(`Kademlia: No direct WebRTC connection to ${toPeerId}, peer connected: ${peer?.connected}, peer exists: ${!!peer}`);
+      console.log(`Kademlia: Skipping RPC to ${toPeerId} - WebRTC connection not available (peer exists: ${!!peer}, connected: ${peer?.connected})`);
       throw new Error(`No direct WebRTC connection to ${toPeerId}`);
     }
 

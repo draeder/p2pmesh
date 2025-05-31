@@ -19,7 +19,8 @@ export class PeerManager {
     
     this.peers = new Map(); // Map of peerId to Peer instance (direct WebRTC connections)
     this.peerConnectionAttempts = new Map(); // Track connection attempt timestamps
-    this.CONNECTION_TIMEOUT = 15000; // 15 seconds timeout for stalled connections
+    // FIXED: Shorter timeout for WebTorrent connections to prevent stuck states
+    this.CONNECTION_TIMEOUT = 30000; // 30 seconds timeout for WebTorrent connections
     this.disconnectedPeers = new Set(); // Track disconnected peers to prevent duplicate events
     this.pendingConnections = new Set(); // Track peers currently attempting to connect
     

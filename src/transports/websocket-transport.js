@@ -18,6 +18,7 @@ export class WebSocketTransport extends AbstractTransport {
     this.signalingServerUrl = signalingServerUrl;
     this.ws = null;
     this.localPeerId = null;
+    this.isConnected = false; // Add missing connection state tracking
     this.pendingKademliaRpcs = new Map(); // For tracking Kademlia RPC replies
   }
 
@@ -36,9 +37,19 @@ export class WebSocketTransport extends AbstractTransport {
     }
 
     return new Promise((resolve, reject) => {
+      // FIXED: Add connection timeout for WebSocket as well
+      const connectionTimeout = setTimeout(() => {
+        console.error('WebSocketTransport: Connection timeout');
+        if (this.ws) {
+          this.ws.close();
+        }
+        reject(new Error('WebSocket connection timeout'));
+      }, 15000); // 15 second timeout
+
       this.ws = new WebSocket(this.signalingServerUrl);
 
       this.ws.onopen = () => {
+        clearTimeout(connectionTimeout);
         console.log(`WebSocketTransport: Connected to ${this.signalingServerUrl}`);
         // Announce presence to the server
         this.ws.send(JSON.stringify({ type: 'join', peerId: this.localPeerId }));
@@ -146,6 +157,16 @@ export class WebSocketTransport extends AbstractTransport {
                   reason: message.reason,
                   maxPeers: message.maxPeers,
                   alternativePeers: message.alternativePeers || []
+                });
+              }
+              break;
+            case 'signal_rejected': // Signal rejection message (race condition prevention)
+              if (message.from) {
+                console.log(`WebSocketTransport: Received signal_rejected from ${message.from}: ${message.reason || 'No reason provided'}`);
+                this.emit('signal_rejected', { 
+                  from: message.from, 
+                  reason: message.reason,
+                  correctInitiator: message.correctInitiator
                 });
               }
               break;

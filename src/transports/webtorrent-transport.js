@@ -8,10 +8,6 @@ import { AbstractTransport } from './transport-interface.js';
  * Uses WebTorrent's SHA1-based peer IDs and swarms around a dummy torrent infoHash.
  */
 export class WebTorrentTransport extends AbstractTransport {
-  /**
-   * @param {string} infoHash - The torrent infoHash to swarm around (acts as room ID)
-   * @param {object} options - WebTorrent client options
-   */
   constructor(infoHash, options = {}) {
     super();
     
@@ -30,21 +26,8 @@ export class WebTorrentTransport extends AbstractTransport {
     this.isConnected = false;
     this._cryptoModule = null; // Cache for crypto module
     
-    // WebTorrent-specific settings with forced randomness
-    this.clientOptions = {
-      dht: true,
-      tracker: true,
-      // Force random ports to avoid conflicts
-      port: 0,
-      dhtPort: 0,
-      // Disable any caching that might cause ID reuse
-      maxConns: 200,
-      // Add random identifier to force uniqueness
-      _p2pmeshInstance: Math.random().toString(36),
-      ...options
-    };
-    
-    console.log(`WebTorrentTransport initialized for infoHash: ${infoHash}`);
+    // FIXED: Shorter timeouts for faster connection detection
+    this.CONNECTION_TIMEOUT = 30000;
   }
 
   /**
@@ -288,11 +271,27 @@ export class WebTorrentTransport extends AbstractTransport {
           downloadLimit: -1,
           uploadLimit: -1,
           maxConns: 200 + Math.floor(Math.random() * 100), // Randomize max connections
-          // Force random DHT bootstrap nodes order
+          // Force random DHT bootstrap nodes order and add more aggressive settings
           dhtBootstrap: [
             'router.bittorrent.com:6881',
-            'dht.transmissionbt.com:6881'
-          ].sort(() => Math.random() - 0.5)
+            'dht.transmissionbt.com:6881',
+            'router.utorrent.com:6881',
+            'dht.libtorrent.org:25401'
+          ].sort(() => Math.random() - 0.5),
+          // Optimize DHT settings for faster peer discovery
+          dhtPort: 0,
+          dht: {
+            bootstrap: [
+              'router.bittorrent.com:6881',
+              'dht.transmissionbt.com:6881',
+              'router.utorrent.com:6881'
+            ],
+            // More aggressive DHT settings
+            concurrency: 16,
+            maxAge: 300000, // 5 minutes
+            timeBucketOutstanding: 5000, // 5 seconds
+            timeoutReqs: 5000 // 5 seconds
+          }
         };
         
         console.log(`Creating WebTorrent client with P2PMesh peer ID: ${localPeerId}`);
@@ -336,7 +335,7 @@ export class WebTorrentTransport extends AbstractTransport {
             this.handleNewWire(wire);
           });
           
-          // Periodically check for new peers
+          // Periodically check for new peers (reduced interval for faster discovery)
           const peerCheckInterval = setInterval(() => {
             if (torrent.wires && torrent.wires.length > 0) {
               console.log(`WebTorrent: Active wires: ${torrent.wires.length}`);
@@ -347,7 +346,7 @@ export class WebTorrentTransport extends AbstractTransport {
                 }
               });
             }
-          }, 5000);
+          }, 2000); // Reduced from 5000ms to 2000ms for faster peer discovery
           
           // Clean up interval when torrent is destroyed
           torrent.on('destroy', () => {
@@ -369,7 +368,7 @@ export class WebTorrentTransport extends AbstractTransport {
             reject(err);
           });
 
-        // Timeout after 20 seconds
+        // Timeout after 10 seconds (reduced from 20 for faster startup)
         setTimeout(() => {
           if (!this.isConnected) {
             console.log('WebTorrent: Connection timeout, but proceeding with transport');
@@ -378,7 +377,7 @@ export class WebTorrentTransport extends AbstractTransport {
             this.emit('open');
             resolve();
           }
-        }, 20000);
+        }, 10000);
 
       } catch (error) {
         console.error('Failed to create WebTorrent client:', error);
@@ -393,8 +392,8 @@ export class WebTorrentTransport extends AbstractTransport {
   async addDummyTorrent() {
     return new Promise((resolve, reject) => {
       try {
-        // Create a magnet URI with the exact infoHash we want to join
-        const magnetURI = `magnet:?xt=urn:btih:${this.infoHash}&dn=p2pmesh-room-${this.infoHash.substring(0, 8)}&tr=udp://tracker.openbittorrent.com:80&tr=udp://tracker.opentrackr.org:1337&tr=wss://tracker.btorrent.xyz&tr=wss://tracker.openwebtorrent.com`;
+        // Create a magnet URI with the exact infoHash we want to join (optimized with more trackers)
+        const magnetURI = `magnet:?xt=urn:btih:${this.infoHash}&dn=p2pmesh-room-${this.infoHash.substring(0, 8)}&tr=udp://tracker.openbittorrent.com:80&tr=udp://tracker.opentrackr.org:1337&tr=wss://tracker.btorrent.xyz&tr=wss://tracker.openwebtorrent.com&tr=udp://tracker.internetwarriors.net:6969&tr=udp://tracker.leechers-paradise.org:6969&tr=wss://tracker.webtorrent.io&tr=udp://explodie.org:6969`;
         
         console.log(`WebTorrent: Joining swarm via magnet URI: ${magnetURI}`);
         
@@ -425,14 +424,14 @@ export class WebTorrentTransport extends AbstractTransport {
           }
         });
 
-        // If no peers found after 5 seconds, try to seed our own torrent
+        // If no peers found after 3 seconds, try to seed our own torrent (reduced from 5 seconds)
         setTimeout(() => {
           if (!fallbackTriggered && (!this.torrent.ready || this.torrent.wires.length === 0)) {
             fallbackTriggered = true;
             console.log('WebTorrent: No existing peers found, seeding new torrent...');
             this.createAndSeedNewTorrent().then(resolve).catch(reject);
           }
-        }, 5000);
+        }, 3000); // Reduced from 5000ms for faster fallback
 
       } catch (error) {
         console.error('WebTorrent: Error in addDummyTorrent:', error);
@@ -485,7 +484,11 @@ export class WebTorrentTransport extends AbstractTransport {
             ['udp://tracker.openbittorrent.com:80'],
             ['udp://tracker.opentrackr.org:1337'],
             ['wss://tracker.btorrent.xyz'],
-            ['wss://tracker.openwebtorrent.com']
+            ['wss://tracker.openwebtorrent.com'],
+            ['udp://tracker.internetwarriors.net:1337'],
+            ['udp://tracker.leechers-paradise.org:6969'],
+            ['wss://tracker.webtorrent.io'],
+            ['udp://explodie.org:6969']
           ]
         });
 
@@ -514,13 +517,13 @@ export class WebTorrentTransport extends AbstractTransport {
           reject(err);
         });
 
-        // Set a timeout for torrent readiness
+        // Set a timeout for torrent readiness (reduced for faster startup)
         setTimeout(() => {
           if (!this.torrent || !this.torrent.ready) {
             console.log('WebTorrent: Seeding timeout, but continuing anyway');
             resolve();
           }
-        }, 10000);
+        }, 5000); // Reduced from 10000ms for faster startup
 
       } catch (error) {
         console.error('WebTorrent: Error creating and seeding new torrent:', error);
@@ -804,10 +807,10 @@ export class WebTorrentTransport extends AbstractTransport {
         }
       };
       
-      // Wait a bit for handshake to complete, then send hello message
+      // Wait briefly for handshake to complete, then send hello message (reduced delay)
       setTimeout(() => {
         this.sendHelloMessage(remotePeerId);
-      }, 1000);
+      }, 200); // Reduced from 1000ms for faster handshake
       
     } catch (error) {
       console.error(`WebTorrent: Failed to setup extension protocol with ${remotePeerId}:`, error);
@@ -871,14 +874,22 @@ export class WebTorrentTransport extends AbstractTransport {
     this.send(remotePeerId, helloMessage);
     this.sentHellos.add(remotePeerId);
     
-    // Also send a connect request to initiate WebRTC handshake
-    setTimeout(() => {
-      console.log(`WebTorrent: Sending connect request to peer ${remotePeerId}`);
-      this.send(remotePeerId, {
-        type: 'connect_request',
-        from: this.localPeerId
-      });
-    }, 500);
+    // Remove automatic connect request - let the hello/hello_response flow handle initiation
+    // setTimeout(() => {
+    //   console.log(`WebTorrent: Sending connect request to peer ${remotePeerId}`);
+    //   this.send(remotePeerId, {
+    //     type: 'connect_request',
+    //     from: this.localPeerId
+    //   });
+    // }, 200);
+  }
+
+  /**
+   * Determines if this peer should initiate connection based on peer ID comparison
+   */
+  shouldInitiateConnection(remotePeerId) {
+    // Only the peer with the lexicographically higher ID should initiate
+    return this.localPeerId > remotePeerId;
   }
 
   /**
@@ -891,16 +902,26 @@ export class WebTorrentTransport extends AbstractTransport {
     switch (message.type) {
       case 'hello':
         console.log(`WebTorrent: Received hello from ${fromPeerId}, sending response`);
-        // Respond with our own hello response if we haven't sent a hello to this peer yet
-        if (!this.sentHellos.has(fromPeerId)) {
-          this.sendHelloResponse(fromPeerId);
-        }
+        // Respond with our own hello response
+        this.sendHelloResponse(fromPeerId);
         break;
         
       case 'hello_response':
         console.log(`WebTorrent: Received hello response from ${fromPeerId}`);
         // Mark peer as ready for P2PMesh communication
         this.markPeerReady(fromPeerId);
+        // FIXED: Only initiate if we should be the initiator AND we're not already connecting
+        if (this.shouldInitiateConnection(fromPeerId)) {
+          setTimeout(() => {
+            console.log(`WebTorrent: Initiating connect request to ${fromPeerId} (we are initiator)`);
+            this.send(fromPeerId, {
+              type: 'connect_request',
+              from: this.localPeerId
+            });
+          }, 100); // Small delay to avoid immediate race
+        } else {
+          console.log(`WebTorrent: Waiting for connect request from ${fromPeerId} (they are initiator)`);
+        }
         break;
 
       case 'signal':
@@ -912,10 +933,31 @@ export class WebTorrentTransport extends AbstractTransport {
 
       case 'connect_request':
         console.log(`WebTorrent: Received connect request from ${fromPeerId}`);
-        this.emit('connect_request', {
-          from: fromPeerId,
-          data: message.data
-        });
+        // FIXED: Deterministic conflict resolution based on peer ID comparison
+        if (this.shouldInitiateConnection(fromPeerId)) {
+          // We should be the initiator - reject their request and send our own
+          console.log(`WebTorrent: Rejecting connect request from ${fromPeerId}, we should initiate (${this.localPeerId} > ${fromPeerId})`);
+          this.send(fromPeerId, {
+            type: 'connection_rejected',
+            from: this.localPeerId,
+            reason: 'initiator_conflict'
+          });
+          // Send our own connect request after a brief delay
+          setTimeout(() => {
+            console.log(`WebTorrent: Sending our own connect request to ${fromPeerId}`);
+            this.send(fromPeerId, {
+              type: 'connect_request',
+              from: this.localPeerId
+            });
+          }, 200);
+        } else {
+          // They should be the initiator - accept their request
+          console.log(`WebTorrent: Accepting connect request from ${fromPeerId} (they are initiator: ${fromPeerId} > ${this.localPeerId})`);
+          this.emit('connect_request', {
+            from: fromPeerId,
+            data: message.data
+          });
+        }
         break;
 
       case 'kademlia_rpc':
@@ -941,11 +983,15 @@ export class WebTorrentTransport extends AbstractTransport {
         break;
 
       case 'connection_rejected':
-        this.emit('connection_rejected', {
-          from: fromPeerId,
-          reason: message.reason,
-          alternatives: message.alternatives
-        });
+        console.log(`WebTorrent: Connection rejected by ${fromPeerId}, reason: ${message.reason}`);
+        // Don't emit rejection for initiator conflicts - this is expected behavior
+        if (message.reason !== 'initiator_conflict') {
+          this.emit('connection_rejected', {
+            from: fromPeerId,
+            reason: message.reason,
+            alternatives: message.alternatives
+          });
+        }
         break;
 
       default:
@@ -968,15 +1014,6 @@ export class WebTorrentTransport extends AbstractTransport {
     
     this.send(remotePeerId, response);
     this.sentHellos.add(remotePeerId);
-    
-    // Also send a connect request to initiate WebRTC handshake
-    setTimeout(() => {
-      console.log(`WebTorrent: Sending connect request to peer ${remotePeerId} (from hello response)`);
-      this.send(remotePeerId, {
-        type: 'connect_request',
-        from: this.localPeerId
-      });
-    }, 500);
   }
 
   /**
@@ -1159,8 +1196,29 @@ export class WebTorrentTransport extends AbstractTransport {
       });
     }
     
-    // Force torrent to announce itself to trackers
-    if (this.torrent.announce) {
+    // Force torrent to re-announce to trackers
+    if (this.torrent && this.torrent.discovery) {
+      try {
+        // Check what methods are available on the discovery object
+        if (typeof this.torrent.discovery.updateInterest === 'function') {
+          this.torrent.discovery.updateInterest();
+          console.log(`WebTorrent: Forced re-announce to trackers via discovery.updateInterest`);
+        } else if (typeof this.torrent.discovery.announce === 'function') {
+          this.torrent.discovery.announce();
+          console.log(`WebTorrent: Forced re-announce to trackers via discovery.announce`);
+        } else {
+          // Fallback: try to restart discovery
+          if (typeof this.torrent.discovery.restart === 'function') {
+            this.torrent.discovery.restart();
+            console.log(`WebTorrent: Restarted discovery for re-announce`);
+          } else {
+            console.log(`WebTorrent: No suitable discovery method available for re-announce`);
+          }
+        }
+      } catch (e) {
+        console.warn(`WebTorrent: Failed to force re-announce via discovery:`, e.message);
+      }
+    } else if (this.torrent && typeof this.torrent.announce === 'function') {
       try {
         this.torrent.announce();
         console.log(`WebTorrent: Forced announce to trackers`);

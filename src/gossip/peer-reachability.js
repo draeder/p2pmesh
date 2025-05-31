@@ -8,11 +8,11 @@ export class PeerReachabilityManager {
     this.localPeerId = localPeerId;
     this.getPeerConnectionStatus = getPeerConnectionStatus;
     
-    // FIXED: EXTREMELY lenient peer connectivity tracking for small networks
+    // FIXED: Even more lenient peer connectivity tracking for WebTorrent
     this.peerReachability = new Map(); // peerId -> { lastSeen, failures, reachable, lastConnectivityCheck, lastHealAttempt }
-    this.connectivityCheckInterval = 60000; // INCREASED: 60 seconds (was 45)
-    this.maxFailures = 15; // INCREASED: Much more tolerance (was 8)
-    this.reachabilityTimeout = 600000; // INCREASED: 10 minutes before considering peer potentially unreachable (was 5 minutes)
+    this.connectivityCheckInterval = 90000; // INCREASED: 90 seconds (was 60)
+    this.maxFailures = 25; // INCREASED: Much more tolerance (was 15)
+    this.reachabilityTimeout = 900000; // INCREASED: 15 minutes before considering peer potentially unreachable (was 10 minutes)
     
     this.knownPeers = new Set(); // All peers we've ever seen
     this.lastConnectivityCheck = 0;
@@ -206,6 +206,22 @@ export class PeerReachabilityManager {
     // Also add all known peers from our set
     for (const peerId of this.knownPeers) {
       reachablePeers.add(peerId);
+    }
+    
+    // FIXED: Also add any peers that are currently connecting
+    if (this.getPeerConnectionStatus) {
+      // This helps ensure we don't exclude peers that are in the process of connecting
+      try {
+        const allPeerIds = Array.from(this.knownPeers);
+        allPeerIds.forEach(peerId => {
+          const status = this.getPeerConnectionStatus(peerId);
+          if (status && (status.connected || status.connecting)) {
+            reachablePeers.add(peerId);
+          }
+        });
+      } catch (error) {
+        console.warn('Error checking peer connection status:', error);
+      }
     }
     
     return reachablePeers;

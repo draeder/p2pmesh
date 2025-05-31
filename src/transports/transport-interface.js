@@ -12,7 +12,6 @@
  * - 'error': When an error occurs
  * - 'ack': When an acknowledgment is received
  * - 'bootstrap_peers': When a list of bootstrap peers is received
- * - 'kademlia_rpc_message': When a Kademlia RPC message is received
  * - 'open': When the transport connection is opened
  * - 'close': When the transport connection is closed
  */
@@ -72,16 +71,6 @@ export class AbstractTransport {
     if (this.eventListeners.has(eventName)) {
       this.eventListeners.get(eventName).forEach(handler => handler(data));
     }
-  }
-
-  /**
-   * Sends a Kademlia RPC message to a specific peer.
-   * @param {string} toPeerId - The Kademlia ID of the recipient peer.
-   * @param {object} kademliaRpcMessage - The Kademlia RPC message to send.
-   * @returns {Promise<object>} A promise that resolves with the Kademlia RPC reply or rejects on error/timeout.
-   */
-  sendKademliaRpc(toPeerId, kademliaRpcMessage) {
-    throw new Error('Method "sendKademliaRpc()" must be implemented.');
   }
 
   /**

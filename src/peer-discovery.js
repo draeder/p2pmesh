@@ -108,7 +108,18 @@ export class PeerDiscovery {
       : this.kademlia.routingTable.buckets.flat();
     
     const routingTablePeers = allContacts
-      .filter(c => c.id !== this.localPeerId && !this.peerManager.getPeers().has(c.id));
+      .filter(c => c.id !== this.localPeerId && !this.peerManager.getPeers().has(c.id) && !this.peerManager.pendingConnections.has(c.id));
+    
+    // FIXED: Also check for stalled connections that should be retried
+    const stalledConnections = [];
+    this.peerManager.getPeers().forEach((peer, peerId) => {
+      if (!peer.connected && peer.readyState === 'connecting') {
+        const connectionStartTime = this.peerManager.peerConnectionAttempts.get(peerId);
+        if (connectionStartTime && (Date.now() - connectionStartTime) > 20000) { // 20 seconds
+          stalledConnections.push(peerId);
+        }
+      }
+    });
     
     // Check reconnection data
     const reconnectionPeers = this._reconnectionPeers
@@ -118,9 +129,17 @@ export class PeerDiscovery {
     const alternativePeers = this._alternativePeers
       .filter(id => id !== this.localPeerId && !this.peerManager.getPeers().has(id));
     
-    const totalPotential = routingTablePeers.length + reconnectionPeers.length + alternativePeers.length;
+    const totalPotential = routingTablePeers.length + reconnectionPeers.length + alternativePeers.length + stalledConnections.length;
     
-    console.log(`PEER-DISCOVERY: Potential peers available - Routing: ${routingTablePeers.length}, Reconnection: ${reconnectionPeers.length}, Alternative: ${alternativePeers.length}, Total: ${totalPotential}`);
+    console.log(`PEER-DISCOVERY: Potential peers available - Routing: ${routingTablePeers.length}, Reconnection: ${reconnectionPeers.length}, Alternative: ${alternativePeers.length}, Stalled: ${stalledConnections.length}, Total: ${totalPotential}`);
+    
+    // FIXED: Clean up stalled connections
+    if (stalledConnections.length > 0) {
+      console.log(`PEER-DISCOVERY: Found ${stalledConnections.length} stalled connections, cleaning up:`, stalledConnections);
+      stalledConnections.forEach(peerId => {
+        this.peerManager.forceDisconnectPeer(peerId);
+      });
+    }
     
     return totalPotential > 0;
   }

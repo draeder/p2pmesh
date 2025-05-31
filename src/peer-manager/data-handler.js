@@ -11,6 +11,12 @@ export class DataHandler {
     this.signalingOptimizer = options.signalingOptimizer;
     this.pendingConnections = options.pendingConnections;
     this.peerConnectionAttempts = options.peerConnectionAttempts;
+    
+    // Add tracking for relay signals
+    this.pendingRelaySignals = new Map(); // Track pending relay signals by target peer
+    this.relayTimeouts = new Map(); // Track timeouts for relay signals
+    this.maxRelayTimeout = 10000; // 10 seconds timeout for relay signals
+    this.maxRelayPathLength = 3; // Prevent infinite relay loops
   }
 
   /**
@@ -105,6 +111,13 @@ export class DataHandler {
       if (this.eventHandlers['message']) {
         this.eventHandlers['message']({ from: remotePeerId, data: parsedData });
       }
+    } else if (parsedData && parsedData.type === 'kademlia_rpc') {
+      // REMOVED: Don't pass internal Kademlia RPC messages to application layer
+      console.log(`DataHandler: Filtered out internal Kademlia RPC message from ${remotePeerId}`);
+      // These are handled internally by the Kademlia system, don't expose to application
+      if (this.eventHandlers['kademlia_rpc']) {
+        this.eventHandlers['kademlia_rpc'](parsedData, remotePeerId);
+      }
     } else if (parsedData) {
       // Emit as a generic 'message' event if it's structured but not internal protocol messages
       if (this.eventHandlers['message']) {
@@ -151,9 +164,31 @@ export class DataHandler {
       const receivedTime = Date.now();
       const relayLatency = parsedData.timestamp ? (receivedTime - parsedData.timestamp) : 'unknown';
       
+      // Validate relay path to prevent loops
+      const relayPath = parsedData.relayPath || [];
+      if (relayPath.includes(this.localPeerId)) {
+        console.warn(`Detected relay loop for signal from ${parsedData.from} to ${parsedData.to}, dropping`);
+        this.sendRelayFailure(remotePeerId, parsedData.from, parsedData.to, 'Relay loop detected');
+        return;
+      }
+      
+      if (relayPath.length >= this.maxRelayPathLength) {
+        console.warn(`Relay path too long (${relayPath.length}) for signal from ${parsedData.from} to ${parsedData.to}, dropping`);
+        this.sendRelayFailure(remotePeerId, parsedData.from, parsedData.to, 'Relay path too long');
+        return;
+      }
+      
       if (parsedData.to === this.localPeerId) {
         // Signal is for us - process it directly and acknowledge receipt
-        console.log(`Received relayed signal from ${parsedData.from} via peer ${remotePeerId} (latency: ${relayLatency}ms)`);
+        console.log(`Received relayed signal from ${parsedData.from} via ${relayPath.length > 0 ? relayPath.join(' -> ') + ' -> ' : ''}${remotePeerId} (latency: ${relayLatency}ms)`);
+        
+        // Clear any pending relay tracking for this signal
+        const signalKey = `${parsedData.from}-${parsedData.to}`;
+        if (this.pendingRelaySignals.has(signalKey)) {
+          clearTimeout(this.relayTimeouts.get(signalKey));
+          this.pendingRelaySignals.delete(signalKey);
+          this.relayTimeouts.delete(signalKey);
+        }
         
         // Process the signal data
         if (this.eventHandlers['signal']) {
@@ -169,7 +204,8 @@ export class DataHandler {
               to: parsedData.from,
               from: this.localPeerId,
               originalTimestamp: parsedData.timestamp,
-              receivedTimestamp: receivedTime
+              receivedTimestamp: receivedTime,
+              relayPath: relayPath
             }));
           }
         } catch (error) {
@@ -177,14 +213,20 @@ export class DataHandler {
         }
       } else {
         // Signal is for another peer - relay it further if we can
-        console.log(`Relaying signal from ${parsedData.from} to ${parsedData.to}`);
+        const newRelayPath = [...relayPath, this.localPeerId];
+        console.log(`Relaying signal from ${parsedData.from} to ${parsedData.to} (path: ${newRelayPath.join(' -> ')})`);
+        
         const targetPeer = this.peers.get(parsedData.to);
         if (targetPeer && targetPeer.connected) {
           try {
+            // Track this relay attempt
+            const signalKey = `${parsedData.from}-${parsedData.to}`;
+            this.trackRelaySignal(signalKey, parsedData, remotePeerId);
+            
             // Preserve original timestamp for accurate latency measurement
             targetPeer.send(JSON.stringify({
               ...parsedData,
-              relayPath: [...(parsedData.relayPath || []), this.localPeerId] // Track relay path
+              relayPath: newRelayPath
             }));
             console.log(`Successfully relayed signal to ${parsedData.to}`);
           } catch (error) {
@@ -194,8 +236,93 @@ export class DataHandler {
         } else {
           console.warn(`Cannot relay signal to ${parsedData.to}: not connected`);
           this.sendRelayFailure(remotePeerId, parsedData.from, parsedData.to, 'Peer not connected');
+          
+          // Try to find alternative relay paths
+          this.findAlternativeRelayPath(parsedData, remotePeerId, newRelayPath);
         }
       }
+    }
+  }
+
+  /**
+   * Track relay signal for timeout detection
+   */
+  trackRelaySignal(signalKey, parsedData, relayPeerId) {
+    // Clear any existing timeout for this signal
+    if (this.relayTimeouts.has(signalKey)) {
+      clearTimeout(this.relayTimeouts.get(signalKey));
+    }
+    
+    this.pendingRelaySignals.set(signalKey, {
+      signal: parsedData,
+      relayPeer: relayPeerId,
+      timestamp: Date.now()
+    });
+    
+    // Set timeout for this relay
+    const timeoutId = setTimeout(() => {
+      console.warn(`Relay signal timeout for ${signalKey}`);
+      this.handleRelayTimeout(signalKey);
+    }, this.maxRelayTimeout);
+    
+    this.relayTimeouts.set(signalKey, timeoutId);
+  }
+
+  /**
+   * Handle relay signal timeout
+   */
+  handleRelayTimeout(signalKey) {
+    const pendingRelay = this.pendingRelaySignals.get(signalKey);
+    if (pendingRelay) {
+      console.warn(`Relay signal timed out after ${this.maxRelayTimeout}ms: ${signalKey}`);
+      
+      // Clean up
+      this.pendingRelaySignals.delete(signalKey);
+      this.relayTimeouts.delete(signalKey);
+      
+      // Send failure notification
+      this.sendRelayFailure(
+        pendingRelay.relayPeer,
+        pendingRelay.signal.from,
+        pendingRelay.signal.to,
+        'Relay timeout'
+      );
+      
+      // Try to find alternative relay paths if available
+      this.findAlternativeRelayPath(pendingRelay.signal, pendingRelay.relayPeer, pendingRelay.signal.relayPath || []);
+    }
+  }
+
+  /**
+   * Find alternative relay paths when direct relay fails
+   */
+  findAlternativeRelayPath(signalData, originalRelayPeer, currentPath) {
+    const targetPeer = signalData.to;
+    const availablePeers = Array.from(this.peers.keys()).filter(peerId => 
+      peerId !== this.localPeerId && 
+      peerId !== targetPeer && 
+      peerId !== originalRelayPeer &&
+      !currentPath.includes(peerId) &&
+      this.peers.get(peerId)?.connected
+    );
+    
+    if (availablePeers.length > 0) {
+      const alternativePeer = availablePeers[0]; // Use first available peer
+      console.log(`Trying alternative relay path through ${alternativePeer} for signal from ${signalData.from} to ${targetPeer}`);
+      
+      try {
+        const peer = this.peers.get(alternativePeer);
+        if (peer) {
+          peer.send(JSON.stringify({
+            ...signalData,
+            relayPath: [...currentPath, this.localPeerId]
+          }));
+        }
+      } catch (error) {
+        console.error(`Failed to send signal through alternative relay ${alternativePeer}:`, error);
+      }
+    } else {
+      console.warn(`No alternative relay paths available for signal from ${signalData.from} to ${targetPeer}`);
     }
   }
 
@@ -237,11 +364,25 @@ export class DataHandler {
           to: originalSender,
           from: this.localPeerId,
           targetPeer: targetPeer,
-          reason: reason
+          reason: reason,
+          timestamp: Date.now()
         }));
+        console.log(`Sent relay failure notification to ${relayPeerId}: ${reason}`);
       }
     } catch (error) {
       console.error(`Failed to send relay failure notification:`, error);
     }
+  }
+
+  /**
+   * Clean up method to clear timeouts when shutting down
+   */
+  cleanup() {
+    // Clear all pending relay timeouts
+    for (const timeoutId of this.relayTimeouts.values()) {
+      clearTimeout(timeoutId);
+    }
+    this.relayTimeouts.clear();
+    this.pendingRelaySignals.clear();
   }
 }

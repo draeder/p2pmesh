@@ -82,8 +82,7 @@ export class P2PMesh {
         },
         'gossip': (data, remotePeerId) => this.gossipProtocol?.handleIncomingMessage(data, remotePeerId),
         'reconnection_data': (data, remotePeerId) => this.handleReconnectionData(data, remotePeerId),
-        // FIXED: Handle Kademlia RPC via direct WebRTC
-        'kademlia_rpc': (data, remotePeerId) => this.handleKademliaRpc(data, remotePeerId)
+        // REMOVED: Internal Kademlia RPC handling - now handled completely internally
       }
     });
 
@@ -220,6 +219,11 @@ export class P2PMesh {
     this.transportInstance.on('connection_rejected', ({ from, reason, alternativePeers }) => {
       this.handleConnectionRejection(from, reason, alternativePeers);
     });
+
+    // Handle signal rejections (race condition prevention)
+    this.transportInstance.on('signal_rejected', ({ from, reason, correctInitiator }) => {
+      this.handleSignalRejection(from, reason, correctInitiator);
+    });
   }
 
   /**
@@ -275,6 +279,50 @@ export class P2PMesh {
   }
 
   /**
+   * Handle signal rejections from other peers (race condition prevention)
+   * @param {string} from - Peer ID that sent the rejection
+   * @param {string} reason - Reason for rejection
+   * @param {string} correctInitiator - The peer ID that should be the initiator
+   */
+  async handleSignalRejection(from, reason, correctInitiator) {
+    console.log(`P2PMesh: Received signal rejection from ${from} (reason: ${reason}, correct initiator: ${correctInitiator})`);
+    
+    // Clean up any pending connection attempts since they're not valid
+    const peers = this.peerManager.getPeers();
+    if (peers.has(from)) {
+      const peer = peers.get(from);
+      if (peer && !peer.connected) {
+        console.log(`P2PMesh: Cleaning up rejected connection attempt to ${from}`);
+        peer.destroy();
+        peers.delete(from);
+      }
+    }
+    
+    // Clear any pending connection state
+    this.peerManager.peerConnectionAttempts.delete(from);
+    this.peerManager.pendingConnections.delete(from);
+    
+    // If we should be the initiator, wait a bit and then initiate the connection properly
+    if (correctInitiator === this.localPeerId) {
+      console.log(`P2PMesh: We should be the initiator for ${from}, will retry connection as initiator`);
+      // Add a delay to avoid immediate retry conflicts
+      setTimeout(async () => {
+        try {
+          const currentPeerCount = this.peerManager.getPeerCount();
+          if (currentPeerCount < this.maxPeers && !peers.has(from)) {
+            console.log(`P2PMesh: Retrying connection to ${from} as the correct initiator`);
+            await this.peerManager.requestConnection(from, true);
+          }
+        } catch (error) {
+          console.error(`P2PMesh: Failed to retry connection to ${from} as initiator:`, error);
+        }
+      }, 200 + Math.random() * 300); // Random delay between 200-500ms to avoid perfect timing conflicts
+    } else {
+      console.log(`P2PMesh: Peer ${correctInitiator} should be the initiator for ${from}, waiting for their connection attempt`);
+    }
+  }
+
+  /**
    * FIXED: Handles incoming WebRTC signals with proper state management
    * @param {string} from - Peer ID sending the signal
    * @param {Object} signal - WebRTC signal data
@@ -310,10 +358,32 @@ export class P2PMesh {
         this.peerManager.pendingConnections.delete(from);
       }
     } else {
-      // Potentially a new peer trying to connect (WebRTC handshake)
-      // Use deterministic initiator selection to prevent race conditions
+      // RACE CONDITION FIX: Implement deterministic initiator selection to prevent dual offers
       // The peer with the lexicographically smaller ID becomes the initiator
       const shouldBeInitiator = this.localPeerId < from;
+      
+      // CRITICAL FIX: If we receive an offer but WE should be the initiator, reject it
+      if (signal.type === 'offer' && shouldBeInitiator) {
+        console.log(`RACE CONDITION PREVENTED: Ignoring offer from ${from} because we (${this.localPeerId}) should be the initiator`);
+        // Send a polite rejection and let our connection process take over
+        this.transportInstance.send(from, {
+          type: 'signal_rejected',
+          reason: 'initiator_conflict',
+          correctInitiator: this.localPeerId
+        });
+        
+        // Ensure we're trying to connect to them with us as initiator
+        if (!this.peerManager.pendingConnections.has(from)) {
+          console.log(`Initiating connection to ${from} with us as initiator to resolve race condition`);
+          setTimeout(() => this.peerManager.requestConnection(from, true), 100);
+        }
+        return;
+      }
+      
+      // CRITICAL FIX: If we receive an offer and they should be the initiator, accept it
+      if (signal.type === 'offer' && !shouldBeInitiator) {
+        console.log(`Accepting offer from ${from} as they should be the initiator`);
+      }
       
       console.log(`Received signal for WebRTC from new peer ${from}, requesting connection (initiator: ${shouldBeInitiator}).`);
       const connectionAllowed = await this.peerManager.requestConnection(from, shouldBeInitiator);

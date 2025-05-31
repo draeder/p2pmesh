@@ -336,7 +336,7 @@ export class ConnectionManager {
   }
 
   /**
-   * FIXED: Attempts to connect to a new peer with connection state validation
+   * ENHANCED: Attempts to connect to a new peer with robust connection state validation
    */
   async connectToPeer(remotePeerId, initiator = true) {
     if (this.peers.has(remotePeerId) || this.pendingConnections.has(remotePeerId)) {
@@ -348,10 +348,11 @@ export class ConnectionManager {
 
     try {
       const Peer = await loadSimplePeer();
-      // FIXED: Add connection state tracking and timeout handling
+      // ENHANCED: Add comprehensive connection state tracking and timeout handling
+      // FIXED: Changed trickle to false to prevent ICE candidate delays in WebTorrent environments
       const newPeer = new Peer({ 
         initiator, 
-        trickle: false, 
+        trickle: false, // Set to false to batch ICE candidates for faster connections
         iceServers: this.iceServers,
         config: {
           iceTransportPolicy: 'all',
@@ -360,16 +361,35 @@ export class ConnectionManager {
         }
       });
       
-      // FIXED: Add connection state validation
+      // ENHANCED: Add comprehensive connection state validation and tracking
       newPeer._connectionState = 'connecting';
       newPeer._lastStateChange = Date.now();
+      newPeer._peerId = remotePeerId; // Store peer ID for debugging
+      newPeer._initiator = initiator;
+      
+      // Track connection attempt immediately
+      this.peerConnectionAttempts.set(remotePeerId, Date.now());
       
       this.setupPeerEvents(newPeer, remotePeerId);
       this.peers.set(remotePeerId, newPeer);
-      console.log(`FIXED: Initiated connection to ${remotePeerId} (initiator: ${initiator}) with state tracking`);
+      
+      console.log(`ENHANCED: Initiated connection to ${remotePeerId} (initiator: ${initiator}) with comprehensive state tracking`);
+      
+      // ENHANCED: Add state change tracking
+      const originalSignal = newPeer.signal;
+      newPeer.signal = function(data) {
+        newPeer._lastStateChange = Date.now();
+        if (data.type === 'offer' || data.type === 'answer') {
+          newPeer._connectionState = data.type === 'offer' ? 'offering' : 'answering';
+          console.log(`STATE: Peer ${remotePeerId} state changed to ${newPeer._connectionState}`);
+        }
+        return originalSignal.call(this, data);
+      };
+      
     } catch (error) {
       console.error(`Failed to create peer connection to ${remotePeerId}:`, error);
       this.pendingConnections.delete(remotePeerId);
+      this.peerConnectionAttempts.delete(remotePeerId);
     }
   }
 

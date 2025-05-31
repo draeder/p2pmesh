@@ -119,6 +119,7 @@ wss.on('connection', (ws) => {
       case 'candidate': // Specific ICE candidate
       case 'ack': // Acknowledge message for connection setup
       case 'connection_rejected': // Connection rejection message
+      case 'signal_rejected': // Signal rejection message (race condition prevention)
         if (parsedMessage.to && peers.has(parsedMessage.to)) {
           const recipientWs = peers.get(parsedMessage.to);
           // Check if recipientWs is defined and its readyState is OPEN
@@ -155,7 +156,7 @@ wss.on('connection', (ws) => {
       case 'kademlia_rpc_response':
         if (parsedMessage.to && peers.has(parsedMessage.to)) {
           const recipientWs = peers.get(parsedMessage.to);
-          if (recipientWs && recipientWs.readyState === WebSocket.OPEN) { // Ensure ws is imported or use WebSocket.OPEN
+          if (recipientWs && recipientWs.readyState === 1) { // 1 = WebSocket.OPEN
             // Add 'from' field if not present, using currentPeerId (already done by client transport)
             // const messageToSend = { ...parsedMessage, from: currentPeerId };
             recipientWs.send(JSON.stringify(parsedMessage)); // Relay the original message
@@ -167,18 +168,18 @@ wss.on('connection', (ws) => {
                 notifyPeerLeft(parsedMessage.to);
             }
             // Optionally notify sender about the failure
-            if (ws.readyState === WebSocket.OPEN) {
+            if (ws.readyState === 1) { // 1 = WebSocket.OPEN
                 ws.send(JSON.stringify({ type: 'error', message: `Peer ${parsedMessage.to} not available for ${parsedMessage.type}.`}));
             }
           }
         } else if (parsedMessage.to) {
           console.warn(`Recipient ${parsedMessage.to} for ${parsedMessage.type} not found.`);
-          if (ws.readyState === WebSocket.OPEN) {
+          if (ws.readyState === 1) {
             ws.send(JSON.stringify({ type: 'error', message: `Peer ${parsedMessage.to} not found for ${parsedMessage.type}.`}));
           }
         } else {
           console.warn(`Message type ${parsedMessage.type} without 'to' field. Ignoring.`);
-          if (ws.readyState === WebSocket.OPEN) {
+          if (ws.readyState === 1) {
             ws.send(JSON.stringify({ type: 'error', message: `'to' field is required for ${parsedMessage.type}.`}));
           }
         }
