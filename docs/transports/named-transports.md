@@ -149,12 +149,12 @@ const mesh = await createMesh({
 
 ### Creating Custom Transports
 
-Custom transports must extend the `AbstractTransport` class:
+Custom transports must extend the `InitiateTransport` class:
 
 ```javascript
-import { AbstractTransport } from '../transports/transport-interface.js';
+import { InitiateTransport } from '../transports/transport-interface.js';
 
-export class MyCustomTransport extends AbstractTransport {
+export class MyCustomTransport extends InitiateTransport {
   constructor(options = {}) {
     super();
     this.options = options;

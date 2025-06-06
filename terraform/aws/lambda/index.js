@@ -1,9 +1,14 @@
 const { ApiGatewayManagementApi } = require('@aws-sdk/client-apigatewaymanagementapi');
+const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
+const { DynamoDBDocumentClient, PutCommand, DeleteCommand, ScanCommand, GetCommand } = require('@aws-sdk/lib-dynamodb');
 
-// Store for connection management (in production, use DynamoDB)
-const connections = new Map();
-const peers = new Map();
 const K_BOOTSTRAP_COUNT = 5;
+const TTL_SECONDS = 300; // 5 minutes TTL for connections
+
+// DynamoDB client
+const dynamoClient = new DynamoDBClient({ region: process.env.AWS_REGION || process.env.REGION });
+const docClient = DynamoDBDocumentClient.from(dynamoClient);
+const CONNECTIONS_TABLE = process.env.CONNECTIONS_TABLE;
 
 // XOR distance calculator
 function calculateXorDistance(id1, id2) {
@@ -47,21 +52,96 @@ async function sendToConnection(connectionId, data) {
   }
 }
 
-function handleDisconnect(connectionId) {
-  const peerId = connections.get(connectionId);
+async function storePeerConnection(connectionId, peerId) {
+  const ttl = Math.floor(Date.now() / 1000) + TTL_SECONDS;
+  
+  try {
+    await docClient.send(new PutCommand({
+      TableName: CONNECTIONS_TABLE,
+      Item: {
+        connectionId,
+        peerId,
+        ttl,
+        lastSeen: Date.now()
+      }
+    }));
+    console.log(`Stored peer ${peerId} with connection ${connectionId}`);
+  } catch (error) {
+    console.error('Error storing peer connection:', error);
+    throw error;
+  }
+}
+
+async function removePeerConnection(connectionId) {
+  try {
+    // First get the peer info
+    const result = await docClient.send(new GetCommand({
+      TableName: CONNECTIONS_TABLE,
+      Key: { connectionId }
+    }));
+    
+    if (result.Item) {
+      await docClient.send(new DeleteCommand({
+        TableName: CONNECTIONS_TABLE,
+        Key: { connectionId }
+      }));
+      console.log(`Removed peer ${result.Item.peerId} with connection ${connectionId}`);
+      return result.Item.peerId;
+    }
+  } catch (error) {
+    console.error('Error removing peer connection:', error);
+  }
+  return null;
+}
+
+async function getAllActivePeers() {
+  try {
+    const result = await docClient.send(new ScanCommand({
+      TableName: CONNECTIONS_TABLE,
+      FilterExpression: '#ttl > :now',
+      ExpressionAttributeNames: {
+        '#ttl': 'ttl'
+      },
+      ExpressionAttributeValues: {
+        ':now': Math.floor(Date.now() / 1000)
+      }
+    }));
+    
+    return result.Items || [];
+  } catch (error) {
+    console.error('Error getting active peers:', error);
+    return [];
+  }
+}
+
+async function getPeerByConnectionId(connectionId) {
+  try {
+    const result = await docClient.send(new GetCommand({
+      TableName: CONNECTIONS_TABLE,
+      Key: { connectionId }
+    }));
+    return result.Item?.peerId || null;
+  } catch (error) {
+    console.error('Error getting peer by connection:', error);
+    return null;
+  }
+}
+
+async function handleDisconnect(connectionId) {
+  const peerId = await removePeerConnection(connectionId);
   if (peerId) {
-    connections.delete(connectionId);
-    peers.delete(peerId);
     console.log(`Peer ${peerId} disconnected and removed.`);
-    notifyPeerLeft(peerId);
+    await notifyPeerLeft(peerId);
   }
 }
 
 async function notifyPeerLeft(leftPeerId) {
+  const activePeers = await getAllActivePeers();
   const notifications = [];
-  for (const [connectionId, peerId] of connections) {
-    if (peerId !== leftPeerId) {
-      notifications.push(sendToConnection(connectionId, { 
+  
+  for (const peer of activePeers) {
+    if (peer.peerId !== leftPeerId) {
+      notifications.push(sendToConnection(peer.connectionId, { 
         type: 'peer_left', 
         peerId: leftPeerId 
       }));
@@ -84,54 +164,52 @@ async function handleMessage(event, connectionId, message) {
     return;
   }
 
-  const currentPeerId = connections.get(connectionId);
+  const currentPeerId = await getPeerByConnectionId(connectionId);
 
   switch (parsedMessage.type) {
     case 'join':
       if (parsedMessage.peerId) {
-        // Handle existing peer ID
-        if (peers.has(parsedMessage.peerId)) {
-          const oldConnectionId = [...connections.entries()]
-            .find(([_, peerId]) => peerId === parsedMessage.peerId)?.[0];
-          if (oldConnectionId && oldConnectionId !== connectionId) {
-            await sendToConnection(oldConnectionId, { 
-              type: 'error', 
-              message: 'Another client joined with your ID.' 
-            });
-            handleDisconnect(oldConnectionId);
-          }
+        const currentPeerId = await getPeerByConnectionId(connectionId);
+        const activePeers = await getAllActivePeers();
+        
+        // Check if peer ID is already in use
+        const existingPeer = activePeers.find(p => p.peerId === parsedMessage.peerId);
+        if (existingPeer && existingPeer.connectionId !== connectionId) {
+          await sendToConnection(existingPeer.connectionId, { 
+            type: 'error', 
+            message: 'Another client joined with your ID.' 
+          });
+          await removePeerConnection(existingPeer.connectionId);
         }
 
-        connections.set(connectionId, parsedMessage.peerId);
-        peers.set(parsedMessage.peerId, connectionId);
-        console.log(`Peer ${parsedMessage.peerId} joined. Total peers: ${peers.size}`);
+        // Store the new connection
+        await storePeerConnection(connectionId, parsedMessage.peerId);
+        console.log(`Peer ${parsedMessage.peerId} joined. Total active peers: ${activePeers.length + 1}`);
 
-        // Send bootstrap peers
-        const otherPeers = [];
-        for (const [peerId, connId] of peers) {
-          if (peerId !== parsedMessage.peerId) {
-            otherPeers.push({ id: peerId, connectionId: connId });
-          }
-        }
+        // Send bootstrap peers (exclude self)
+        const otherPeers = activePeers.filter(p => p.peerId !== parsedMessage.peerId);
 
         if (otherPeers.length > 0) {
           try {
             otherPeers.sort((a, b) => {
-              const distA = calculateXorDistance(parsedMessage.peerId, a.id);
-              const distB = calculateXorDistance(parsedMessage.peerId, b.id);
+              const distA = calculateXorDistance(parsedMessage.peerId, a.peerId);
+              const distB = calculateXorDistance(parsedMessage.peerId, b.peerId);
               return distA < distB ? -1 : (distA > distB ? 1 : 0);
             });
             
             const closestPeersInfo = otherPeers
               .slice(0, K_BOOTSTRAP_COUNT)
-              .map(p => ({ id: p.id }));
+              .map(p => ({ 
+                id: p.peerId,
+                lastSeen: p.lastSeen 
+              }));
 
             if (closestPeersInfo.length > 0) {
               await sendToConnection(connectionId, { 
                 type: 'bootstrap_peers', 
                 peers: closestPeersInfo 
               });
-              console.log(`Sent ${closestPeersInfo.length} bootstrap peers`);
+              console.log(`Sent ${closestPeersInfo.length} bootstrap peers to ${parsedMessage.peerId}`);
             }
           } catch (e) {
             console.error('Error calculating bootstrap peers:', e);
@@ -140,13 +218,11 @@ async function handleMessage(event, connectionId, message) {
 
         // Notify other peers
         const notifications = [];
-        for (const [peerId, connId] of peers) {
-          if (peerId !== parsedMessage.peerId) {
-            notifications.push(sendToConnection(connId, { 
-              type: 'peer_joined', 
-              peerId: parsedMessage.peerId 
-            }));
-          }
+        for (const peer of otherPeers) {
+          notifications.push(sendToConnection(peer.connectionId, { 
+            type: 'peer_joined', 
+            peerId: parsedMessage.peerId 
+          }));
         }
         await Promise.allSettled(notifications);
       }
@@ -162,69 +238,66 @@ async function handleMessage(event, connectionId, message) {
     case 'signal_rejected':
     case 'kademlia_rpc_request':
     case 'kademlia_rpc_response':
-      if (parsedMessage.to && peers.has(parsedMessage.to)) {
-        const recipientConnectionId = peers.get(parsedMessage.to);
+      const activePeers = await getAllActivePeers();
+      const targetPeer = activePeers.find(p => p.peerId === parsedMessage.to);
+      
+      if (targetPeer) {
+        const currentPeerId = await getPeerByConnectionId(connectionId);
         const messageToSend = { ...parsedMessage, from: currentPeerId };
-        const success = await sendToConnection(recipientConnectionId, messageToSend);
-        if (success) {
-          console.log(`Relayed ${parsedMessage.type} from ${currentPeerId} to ${parsedMessage.to}`);
+        const success = await sendToConnection(targetPeer.connectionId, messageToSend);
+        if (!success) {
+          // Peer connection failed, send error back to sender
+          await sendToConnection(connectionId, {
+            type: 'error',
+            message: `Peer ${parsedMessage.to} not found.`
+          });
         }
-      } else if (parsedMessage.to) {
-        await sendToConnection(connectionId, { 
-          type: 'error', 
-          message: `Peer ${parsedMessage.to} not found.` 
+      } else {
+        // Target peer not found
+        await sendToConnection(connectionId, {
+          type: 'error',
+          message: `Peer ${parsedMessage.to} not found.`
         });
       }
       break;
 
-    case 'leave':
-      if (currentPeerId) {
-        console.log(`Peer ${currentPeerId} explicitly leaving.`);
-        handleDisconnect(connectionId);
-      }
-      break;
-
     default:
-      console.log('Unknown message type:', parsedMessage.type);
-      await sendToConnection(connectionId, { 
-        type: 'error', 
-        message: `Unknown message type: ${parsedMessage.type}` 
+      console.log(`Unknown message type: ${parsedMessage.type}`);
+      await sendToConnection(connectionId, {
+        type: 'error',
+        message: `Unknown message type: ${parsedMessage.type}`
       });
+      break;
   }
 }
 
 exports.handler = async (event) => {
   console.log('Event:', JSON.stringify(event, null, 2));
   
-  const { requestContext } = event;
-  const { connectionId, routeKey } = requestContext;
+  const connectionId = event.requestContext.connectionId;
+  const routeKey = event.requestContext.routeKey;
   
   // Initialize API Gateway client
-  apiGatewayClient = initApiGatewayClient(event);
-
+  initApiGatewayClient(event);
+  
   try {
     switch (routeKey) {
       case '$connect':
-        console.log(`Client ${connectionId} connected`);
-        // WebSocket connections don't use traditional CORS headers
-        // Origin validation would be handled here if needed
-        const origin = event.headers?.Origin || event.headers?.origin;
-        console.log(`Connection from origin: ${origin}`);
+        console.log(`Connection established: ${connectionId}`);
         return { statusCode: 200 };
-
+        
       case '$disconnect':
-        console.log(`Client ${connectionId} disconnected`);
-        handleDisconnect(connectionId);
+        await handleDisconnect(connectionId);
         return { statusCode: 200 };
-
+        
       case '$default':
         if (event.body) {
           await handleMessage(event, connectionId, event.body);
         }
         return { statusCode: 200 };
-
+        
       default:
-        console.log('Unknown route:', routeKey);
+        console.log(`Unknown route: ${routeKey}`);
         return { statusCode: 400 };
     }
   } catch (error) {

@@ -1,10 +1,6 @@
 // src/p2p-mesh.js
-import { KademliaDHT, K as KADEMLIA_K_VALUE } from './kademlia.js';
-import { GossipProtocol } from './gossip.js';
-import { PeerManager } from './peer-manager.js';
-import { PeerDiscovery } from './peer-discovery.js';
-import { generatePeerId } from './utils/peer-id-generator.js';
-import { loadSimplePeer } from './utils/simple-peer-loader.js';
+import { MeshCore } from './core/mesh-core.js';
+import { MeshEventHandler } from './core/event-handler.js';
 
 /**
  * Main P2PMesh class that orchestrates all components
@@ -16,114 +12,56 @@ export class P2PMesh {
     this.maxPeers = options.maxPeers || 5;
     this.iceServers = options.iceServers;
     this.transportInstance = options.transport;
-    this.kademliaK = options.kademliaK || KADEMLIA_K_VALUE;
     this.bootstrapNodes = options.bootstrapNodes || [];
     
-    this.eventHandlers = {}; // Object to store event handlers
-    this._cleanupIntervals = []; // Store intervals for cleanup
-    
-    // Components will be initialized in init()
-    this.kademliaInstance = null;
-    this.peerManager = null;
-    this.peerDiscovery = null;
-    this.gossipProtocol = null;
+    // Initialize core and event handler
+    this.core = new MeshCore(options);
+    this.eventHandler = new MeshEventHandler(this);
   }
 
   /**
    * Initializes the P2PMesh instance
    */
   async init() {
-    // Ensure SimplePeer is loaded
-    await loadSimplePeer();
+    // Initialize core components
+    const { localPeerId, kademlia } = await this.core.initialize();
+    this.localPeerId = localPeerId;
+    this.kademliaInstance = kademlia;
 
-    // Generate peer ID if not provided
-    if (!this.localPeerId) {
-      this.localPeerId = await generatePeerId();
-    }
+    // Set up event handlers
+    this.eventHandler.setupTransportEventHandlers();
 
-    console.log(`Initializing P2PMesh with ID: ${this.localPeerId}`);
+    // Initialize managers with event handlers
+    const eventHandlers = {
+      'peer:connect': (peerId) => this.eventHandler.emit('peer:connect', peerId),
+      'peer:disconnect': (peerId) => this.eventHandler.emit('peer:disconnect', peerId),
+      'peer:timeout': (peerId) => this.eventHandler.emit('peer:timeout', peerId),
+      'peer:error': (data) => this.eventHandler.emit('peer:error', data),
+      'peer:evicted': (data) => this.eventHandler.emit('peer:evicted', data),
+      'message': (data) => this.eventHandler.emit('message', data),
+      'signal': (data) => {
+        console.log(`Signal event from peer manager (not emitted to prevent circular handling): ${data.from}`);
+      },
+      'gossip': (data, remotePeerId) => this.gossipProtocol?.handleIncomingMessage(data, remotePeerId),
+      'reconnection_data': (data, remotePeerId) => this.handleReconnectionData(data, remotePeerId),
+    };
 
-    // ENHANCED: For WebTorrent transport, connect first to get the transport's peer ID
-    if (this.transportInstance.constructor.name === 'WebTorrentTransport') {
-      console.log('Detected WebTorrent transport, connecting to get transport peer ID...');
-      await this.transportInstance.connect(this.localPeerId);
-      
-      // Use WebTorrent's peer ID instead of the generated one
-      if (this.transportInstance.localPeerId) {
-        console.log(`Using WebTorrent peer ID: ${this.transportInstance.localPeerId} instead of generated ID: ${this.localPeerId}`);
-        this.localPeerId = this.transportInstance.localPeerId;
-      }
-    }
-
-    // FIXED: Initialize Kademlia DHT (transport only for initial bootstrapping)
-    this.kademliaInstance = new KademliaDHT(this.localPeerId, this.transportInstance, { k: this.kademliaK });
-
-    // Set up transport event handlers for initial bootstrapping only
-    this.setupTransportEventHandlers();
-
-    // Initialize PeerManager
-    this.peerManager = new PeerManager({
-      localPeerId: this.localPeerId,
-      maxPeers: this.maxPeers,
-      iceServers: this.iceServers,
-      kademlia: this.kademliaInstance,
-      transportInstance: this.transportInstance,
-      eventHandlers: {
-        'peer:connect': (peerId) => this.emit('peer:connect', peerId),
-        'peer:disconnect': (peerId) => this.emit('peer:disconnect', peerId),
-        'peer:timeout': (peerId) => this.emit('peer:timeout', peerId),
-        'peer:error': (data) => this.emit('peer:error', data),
-        'peer:evicted': (data) => this.emit('peer:evicted', data),
-        'message': (data) => this.emit('message', data),
-        'signal': (data) => {
-          // FIXED: Don't emit signal events to prevent circular handling
-          // Signals are already handled directly by transport event handlers
-          console.log(`Signal event from peer manager (not emitted to prevent circular handling): ${data.from}`);
-        },
-        'gossip': (data, remotePeerId) => this.gossipProtocol?.handleIncomingMessage(data, remotePeerId),
-        'reconnection_data': (data, remotePeerId) => this.handleReconnectionData(data, remotePeerId),
-        // REMOVED: Internal Kademlia RPC handling - now handled completely internally
-      }
-    });
-
-    // FIXED: Wire up Kademlia with PeerManager for direct WebRTC communication
-    this.kademliaInstance.setPeerManager(this.peerManager);
-    
-    // FIXED: Set up bidirectional reference for routing table connection status checking
-    this.kademliaInstance.routingTable.dht = this.kademliaInstance;
-
-    // Initialize PeerDiscovery
-    this.peerDiscovery = new PeerDiscovery({
-      localPeerId: this.localPeerId,
-      kademlia: this.kademliaInstance,
-      peerManager: this.peerManager,
-      transport: this.transportInstance,
-      maxPeers: this.maxPeers,
-      eventHandlers: this.eventHandlers
-    });
-
-    // Initialize Gossip Protocol
-    this.gossipProtocol = new GossipProtocol({
-      localPeerId: this.localPeerId,
-      dht: this.kademliaInstance,
-      sendFunction: (peerId, data) => this.peerManager.sendRawToPeer(peerId, data),
-      getPeerConnectionStatus: (peerId) => this.getPeerConnectionStatus(peerId)
-    });
+    this.peerManager = this.core.initializePeerManager(eventHandlers);
+    this.peerDiscovery = this.core.initializePeerDiscovery(eventHandlers);
+    this.gossipProtocol = this.core.initializeGossipProtocol();
 
     // Connect gossip protocol to mesh event system
     this.gossipProtocol.subscribe('*', ({ topic, payload, originPeerId }) => {
-      // Only emit if there's a message handler
-      if (this.eventHandlers['message']) {
+      if (this.eventHandler.eventHandlers['message']) {
         console.log(`Gossip: Forwarding message from ${originPeerId} on topic '${topic}' to application`); 
-        this.eventHandlers['message']({
+        this.eventHandler.eventHandlers['message']({
           from: originPeerId,
           data: { type: 'broadcast', topic, payload }
         });
       }
     });
 
-    // Set up transport event handlers for peer connections
-    this.setupPeerConnectionHandlers();
+    this.eventHandler.setupPeerConnectionHandlers();
   }
 
   /**
@@ -151,7 +89,53 @@ export class P2PMesh {
    */
   setupTransportEventHandlers() {
     if (typeof this.transportInstance.on === 'function') {
-      // REMOVED: kademlia_rpc_message handler - now uses direct WebRTC
+      // Handle peer evictions from transport
+      this.transportInstance.on('peer_evicted', ({ peerId, reason, alternativePeers }) => {
+        console.log(`P2PMesh: Transport evicted peer ${peerId} (reason: ${reason})`);
+        
+        // Clean up any local state for the evicted peer
+        const peers = this.peerManager.getPeers();
+        if (peers.has(peerId)) {
+          const peer = peers.get(peerId);
+          if (peer && !peer.destroyed) {
+            peer.destroy();
+          }
+          peers.delete(peerId);
+        }
+        
+        // Clean up tracking
+        this.peerManager.peerConnectionAttempts.delete(peerId);
+        this.peerManager.pendingConnections.delete(peerId);
+        
+        // Store alternative peers if provided
+        if (alternativePeers && alternativePeers.length > 0) {
+          this.peerDiscovery.storeReconnectionData(alternativePeers);
+        }
+        
+        // Emit eviction event
+        this.emit('peer:evicted', { peerId, reason, alternativePeers });
+      });
+
+      // Handle connection state changes from transport
+      this.transportInstance.on('connection_state_changed', ({ peerId, state, timestamp }) => {
+        console.log(`P2PMesh: Transport connection state changed for ${peerId}: ${state}`);
+        
+        // Coordinate with peer manager based on state
+        if (state === 'evicted' || state === 'timeout' || state === 'failed') {
+          const peers = this.peerManager.getPeers();
+          if (peers.has(peerId)) {
+            const peer = peers.get(peerId);
+            if (peer && !peer.destroyed) {
+              peer.destroy();
+            }
+            peers.delete(peerId);
+          }
+          
+          // Clean up tracking
+          this.peerManager.peerConnectionAttempts.delete(peerId);
+          this.peerManager.pendingConnections.delete(peerId);
+        }
+      });
 
       // Listen for bootstrap peers provided by the transport (e.g., from signaling server)
       this.transportInstance.on('bootstrap_peers', async ({ peers: newBootstrapPeers }) => {
@@ -490,9 +474,9 @@ export class P2PMesh {
   handleReconnectionData(data, remotePeerId) {
     this.peerDiscovery.storeReconnectionData(data.peers);
     
-    // Emit a special event that applications can listen for
-    if (this.eventHandlers['peer:evicted']) {
-      this.eventHandlers['peer:evicted']({ 
+    // FIXED: Add missing 'this.' before eventHandlers
+    if (this.eventHandler && this.eventHandler.eventHandlers && this.eventHandler.eventHandlers['peer:evicted']) {
+      this.eventHandler.eventHandlers['peer:evicted']({ 
         reason: data.reason, 
         alternativePeers: data.peers 
       });
@@ -543,7 +527,7 @@ export class P2PMesh {
     }, 30000); // STABILIZED: Check every 30 seconds instead of 5
     
     // Store the interval for cleanup when leaving the mesh
-    this._cleanupIntervals.push(connectionTimeoutInterval);
+    this.core._cleanupIntervals.push(connectionTimeoutInterval);
   }
 
   /**
@@ -551,22 +535,7 @@ export class P2PMesh {
    */
   async leave() {
     console.log('Leaving mesh...');
-    
-    // ENHANCED: Destroy peer discovery first to stop continuous discovery
-    if (this.peerDiscovery) {
-      this.peerDiscovery.destroy();
-    }
-    
-    // Destroy all peer connections
-    this.peerManager.destroy();
-    
-    // Clear all intervals created for this mesh instance
-    if (this._cleanupIntervals.length > 0) {
-      this._cleanupIntervals.forEach(intervalId => clearInterval(intervalId));
-      this._cleanupIntervals = [];
-    }
-    
-    // Disconnect transport
+    this.core.destroy();
     await this.transportInstance.disconnect();
   }
 
@@ -612,11 +581,7 @@ export class P2PMesh {
    * @param {Function} handler - Event handler function
    */
   on(event, handler) {
-    if (typeof handler === 'function') {
-      this.eventHandlers[event] = handler;
-    } else {
-      console.error(`Handler for event '${event}' is not a function.`);
-    }
+    this.eventHandler.on(event, handler);
   }
 
   /**
@@ -625,10 +590,7 @@ export class P2PMesh {
    * @param {any} data - Event data
    */
   emit(event, data) {
-    // Internal method to emit events to registered handlers
-    if (this.eventHandlers[event] && typeof this.eventHandlers[event] === 'function') {
-      this.eventHandlers[event](data);
-    }
+    this.eventHandler.emit(event, data);
     
     // FIXED: When a peer connects, add them as a bridge peer and reset discovery backoff
     if (event === 'peer:connect' && data && this.gossipProtocol) {
@@ -640,8 +602,6 @@ export class P2PMesh {
         this.peerDiscovery.onPeerConnected();
       }
     }
-    
-    // REMOVED: Circular signal handling that was preventing connections
   }
 
   /**

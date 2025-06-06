@@ -322,7 +322,13 @@ export class ConnectionManager {
       
       if (candidateForEviction) {
         console.log(`STABILITY: Evicting peer ${candidateForEviction.peerId} (distance: ${candidateForEviction.distance}, inKademlia: ${candidateForEviction.inKademliaTable}) for closer peer ${newPeerId} (distance: ${distanceToNewPeer})`);
-        this.forceDisconnectPeer(candidateForEviction.peerId);
+        
+        // ENHANCED: Coordinate with transport for proper eviction
+        this.forceDisconnectPeer(candidateForEviction.peerId, 'kademlia_optimization', {
+          replacementPeer: newPeerId,
+          distanceImprovement: candidateForEviction.distance - distanceToNewPeer
+        });
+        
         return true;
       }
       
@@ -336,168 +342,62 @@ export class ConnectionManager {
   }
 
   /**
-   * ENHANCED: Attempts to connect to a new peer with robust connection state validation
+   * ENHANCED: Forces disconnection with transport coordination
+   * @param {string} peerId - Peer ID to disconnect
+   * @param {string} reason - Reason for disconnection
+   * @param {Object} options - Additional options
    */
-  async connectToPeer(remotePeerId, initiator = true) {
-    if (this.peers.has(remotePeerId) || this.pendingConnections.has(remotePeerId)) {
-      console.log(`Already connected or connecting to ${remotePeerId}`);
-      return;
-    }
-
-    this.pendingConnections.add(remotePeerId);
-
-    try {
-      const Peer = await loadSimplePeer();
-      // ENHANCED: Add comprehensive connection state tracking and timeout handling
-      // FIXED: Changed trickle to false to prevent ICE candidate delays in WebTorrent environments
-      const newPeer = new Peer({ 
-        initiator, 
-        trickle: false, // Set to false to batch ICE candidates for faster connections
-        iceServers: this.iceServers,
-        config: {
-          iceTransportPolicy: 'all',
-          bundlePolicy: 'balanced',
-          rtcpMuxPolicy: 'require'
-        }
-      });
-      
-      // ENHANCED: Add comprehensive connection state validation and tracking
-      newPeer._connectionState = 'connecting';
-      newPeer._lastStateChange = Date.now();
-      newPeer._peerId = remotePeerId; // Store peer ID for debugging
-      newPeer._initiator = initiator;
-      
-      // Track connection attempt immediately
-      this.peerConnectionAttempts.set(remotePeerId, Date.now());
-      
-      this.setupPeerEvents(newPeer, remotePeerId);
-      this.peers.set(remotePeerId, newPeer);
-      
-      console.log(`ENHANCED: Initiated connection to ${remotePeerId} (initiator: ${initiator}) with comprehensive state tracking`);
-      
-      // ENHANCED: Add state change tracking
-      const originalSignal = newPeer.signal;
-      newPeer.signal = function(data) {
-        newPeer._lastStateChange = Date.now();
-        if (data.type === 'offer' || data.type === 'answer') {
-          newPeer._connectionState = data.type === 'offer' ? 'offering' : 'answering';
-          console.log(`STATE: Peer ${remotePeerId} state changed to ${newPeer._connectionState}`);
-        }
-        return originalSignal.call(this, data);
-      };
-      
-    } catch (error) {
-      console.error(`Failed to create peer connection to ${remotePeerId}:`, error);
-      this.pendingConnections.delete(remotePeerId);
-      this.peerConnectionAttempts.delete(remotePeerId);
-    }
-  }
-
-  /**
-   * FIXED: Smart eviction for better connectivity (works for all network sizes)
-   */
-  evictForBetterConnectivity(newPeerId) {
-    try {
-      const connectedCount = this.getConnectedPeerCount();
-      
-      // Only evict if we're at maxPeers
-      if (connectedCount < this.maxPeers) {
-        console.log(`STABILITY: Not at maxPeers (${connectedCount}/${this.maxPeers}), no eviction needed`);
-        return false;
-      }
-      
-      // FIXED: Use distance-based eviction for all network sizes
-      const distanceToNewPeer = calculateDistance(this.localPeerId, newPeerId);
-      
-      // Find the furthest connected peer
-      let furthestPeerId = null;
-      let furthestDistance = 0;
-      
-      this.peers.forEach((peer, peerId) => {
-        if (peer.connected) {
-          const distance = calculateDistance(this.localPeerId, peerId);
-          if (distance > furthestDistance) {
-            furthestDistance = distance;
-            furthestPeerId = peerId;
-          }
-        }
-      });
-      
-      // Only evict if the new peer is closer than the furthest peer
-      if (furthestPeerId && distanceToNewPeer < furthestDistance) {
-        console.log(`STABILITY: Evicting furthest peer ${furthestPeerId} (distance: ${furthestDistance}) for closer peer ${newPeerId} (distance: ${distanceToNewPeer})`);
-        this.forceDisconnectPeer(furthestPeerId);
-        return true;
-      }
-      
-      // ENHANCED: Also check for stalled connections that can be replaced
-      const stalledPeer = this.findStalledConnection();
-      if (stalledPeer) {
-        console.log(`STABILITY: Evicting stalled connection ${stalledPeer} for new peer ${newPeerId}`);
-        this.forceDisconnectPeer(stalledPeer);
-        return true;
-      }
-      
-      console.log(`STABILITY: New peer ${newPeerId} (distance: ${distanceToNewPeer}) not closer than furthest peer ${furthestPeerId} (distance: ${furthestDistance}), no eviction`);
-      return false;
-      
-    } catch (error) {
-      console.error(`Error in evictForBetterConnectivity for ${newPeerId}:`, error);
-      return false;
-    }
-  }
-
-  /**
-   * ENHANCED: Find a stalled connection that can be replaced
-   */
-  findStalledConnection() {
-    const now = Date.now();
-    const STALL_TIMEOUT = 30000; // 30 seconds
-    
-    for (const [peerId, peer] of this.peers) {
-      // Check if peer is connecting but not connected for too long
-      if (!peer.connected && peer.connecting) {
-        const attemptTime = this.peerConnectionAttempts.get(peerId);
-        if (attemptTime && (now - attemptTime) > STALL_TIMEOUT) {
-          console.log(`STABILITY: Found stalled connection to ${peerId} (${now - attemptTime}ms)`);
-          return peerId;
-        }
-      }
-      
-      // Check if peer is in a bad state
-      if (peer.destroyed || peer.readyState === 'closed') {
-        console.log(`STABILITY: Found dead connection to ${peerId} (destroyed: ${peer.destroyed}, state: ${peer.readyState})`);
-        return peerId;
-      }
-    }
-    
-    return null;
-  }
-
-  /**
-   * Legacy method for backward compatibility
-   */
-  evictFurthestPeer(newPeerId) {
-    return this.evictForBetterConnectivity(newPeerId);
-  }
-
-  /**
-   * Forces disconnection of a peer
-   */
-  forceDisconnectPeer(peerId) {
+  forceDisconnectPeer(peerId, reason = 'forced_disconnect', options = {}) {
     const peer = this.peers.get(peerId);
-    if (peer) {
-      console.log(`Force disconnecting peer: ${peerId}`);
-      peer.destroy();
+    
+    console.log(`STABILITY: Force disconnecting peer: ${peerId} (reason: ${reason})`);
+    
+    // ENHANCED: Coordinate with transport for proper eviction
+    if (this.transportInstance && typeof this.transportInstance.evictPeer === 'function') {
+      this.transportInstance.evictPeer(peerId, reason, {
+        alternativePeers: this.getAlternativePeers(),
+        ...options
+      });
     }
     
+    // Send reconnection data before disconnecting
+    if (peer && peer.connected && !options.skipReconnectionData) {
+      try {
+        const alternativePeers = this.getAlternativePeers().filter(id => id !== peerId);
+        if (alternativePeers.length > 0) {
+          peer.send(JSON.stringify({
+            type: 'reconnection_data',
+            reason: reason,
+            peers: alternativePeers,
+            timestamp: Date.now()
+          }));
+          console.log(`STABILITY: Sent reconnection data to ${peerId} with ${alternativePeers.length} alternative peers`);
+        }
+      } catch (error) {
+        console.warn(`STABILITY: Failed to send reconnection data to ${peerId}:`, error);
+      }
+    }
+    
+    // Destroy the peer connection
+    if (peer) {
+      try {
+        peer.destroy();
+      } catch (error) {
+        console.warn(`STABILITY: Error destroying peer ${peerId}:`, error);
+      }
+    }
+    
+    // Clean up all tracking
     this.peers.delete(peerId);
     this.peerConnectionAttempts.delete(peerId);
     this.pendingConnections.delete(peerId);
-    this.kademlia.routingTable.removeContact(peerId);
     
-    // STABILIZED: No immediate reconnection after forced disconnection
-    console.log('Forced disconnection completed, relying on periodic check for reconnection');
+    // Update Kademlia routing table
+    if (this.kademlia && this.kademlia.routingTable) {
+      this.kademlia.routingTable.removeContact(peerId);
+    }
+    
+    console.log(`STABILITY: Force disconnection completed for ${peerId}`);
   }
 
   /**
@@ -549,5 +449,76 @@ export class ConnectionManager {
     // Clear backoff timers
     this.reconnectionAttempts.clear();
     this.reconnectionBackoff.clear();
+  }
+
+  /**
+   * ENHANCED: Attempts to connect to a new peer with robust connection state validation
+   */
+  async connectToPeer(remotePeerId, initiator = true) {
+    if (this.peers.has(remotePeerId) || this.pendingConnections.has(remotePeerId)) {
+      console.log(`Already connected or connecting to ${remotePeerId}`);
+      return;
+    }
+
+    // Coordinate with transport for proper connection tracking
+    if (this.transportInstance && typeof this.transportInstance.startConnectionTimeout === 'function') {
+      this.transportInstance.startConnectionTimeout(remotePeerId, {
+        initiator,
+        reason: 'peer_discovery'
+      });
+    }
+
+    this.pendingConnections.add(remotePeerId);
+
+    try {
+      const Peer = await loadSimplePeer();
+      // ENHANCED: Add comprehensive connection state tracking and timeout handling
+      // FIXED: Changed trickle to false to prevent ICE candidate delays in WebTorrent environments
+      const newPeer = new Peer({ 
+        initiator, 
+        trickle: false, // Set to false to batch ICE candidates for faster connections
+        iceServers: this.iceServers,
+        config: {
+          iceTransportPolicy: 'all',
+          bundlePolicy: 'balanced',
+          rtcpMuxPolicy: 'require'
+        }
+      });
+      
+      // ENHANCED: Add comprehensive connection state validation and tracking
+      newPeer._connectionState = 'connecting';
+      newPeer._lastStateChange = Date.now();
+      newPeer._peerId = remotePeerId; // Store peer ID for debugging
+      newPeer._initiator = initiator;
+      
+      // Track connection attempt immediately
+      this.peerConnectionAttempts.set(remotePeerId, Date.now());
+      
+      this.setupPeerEvents(newPeer, remotePeerId);
+      this.peers.set(remotePeerId, newPeer);
+      
+      console.log(`ENHANCED: Initiated connection to ${remotePeerId} (initiator: ${initiator}) with comprehensive state tracking`);
+      
+      // ENHANCED: Add state change tracking
+      const originalSignal = newPeer.signal;
+      newPeer.signal = function(data) {
+        newPeer._lastStateChange = Date.now();
+        if (data.type === 'offer' || data.type === 'answer') {
+          newPeer._connectionState = data.type === 'offer' ? 'offering' : 'answering';
+          console.log(`STATE: Peer ${remotePeerId} state changed to ${newPeer._connectionState}`);
+        }
+        return originalSignal.call(this, data);
+      };
+      
+    } catch (error) {
+      console.error(`Failed to create peer connection to ${remotePeerId}:`, error);
+      this.pendingConnections.delete(remotePeerId);
+      this.peerConnectionAttempts.delete(remotePeerId);
+      
+      // Notify transport of connection failure
+      if (this.transportInstance && typeof this.transportInstance.handlePeerConnectionFailed === 'function') {
+        this.transportInstance.handlePeerConnectionFailed(remotePeerId, error.message);
+      }
+    }
   }
 }

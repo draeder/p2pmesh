@@ -146,6 +146,9 @@ export class PeerManager {
    * @param {boolean} initiator - Whether this peer should initiate the connection
    */
   async connectToPeer(remotePeerId, initiator = true) {
+    if (!this.connectionManager || typeof this.connectionManager.connectToPeer !== 'function') {
+      throw new Error('ConnectionManager not properly initialized or connectToPeer method missing');
+    }
     return await this.connectionManager.connectToPeer(remotePeerId, initiator);
   }
 

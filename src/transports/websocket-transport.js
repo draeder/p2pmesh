@@ -1,12 +1,12 @@
 // src/transports/websocket-transport.js
 
-import { AbstractTransport } from './transport-interface.js';
+import { InitiateTransport } from './transport-interface.js';
 
 /**
  * WebSocket Transport Layer
- * Implements the AbstractTransport interface for signaling via WebSockets.
+ * Implements the InitiateTransport interface for signaling via WebSockets.
  */
-export class WebSocketTransport extends AbstractTransport {
+export class WebSocketTransport extends InitiateTransport {
   /**
    * @param {string} signalingServerUrl - The URL of the WebSocket signaling server.
    */

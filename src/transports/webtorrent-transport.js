@@ -1,13 +1,55 @@
 // src/transports/webtorrent-transport.js
 
-import { AbstractTransport } from './transport-interface.js';
+import { WebTorrentAdapter } from '../adapters/webtorrent-adapter.js';
+
+/**
+ * Simple EventEmitter implementation for browser compatibility
+ */
+class SimpleEventEmitter {
+  constructor() {
+    this.events = {};
+  }
+
+  on(event, listener) {
+    if (!this.events[event]) {
+      this.events[event] = [];
+    }
+    this.events[event].push(listener);
+  }
+
+  emit(event, ...args) {
+    if (this.events[event]) {
+      this.events[event].forEach(listener => {
+        try {
+          listener(...args);
+        } catch (error) {
+          console.error('Event listener error:', error);
+        }
+      });
+    }
+  }
+
+  removeListener(event, listener) {
+    if (this.events[event]) {
+      this.events[event] = this.events[event].filter(l => l !== listener);
+    }
+  }
+
+  removeAllListeners(event) {
+    if (event) {
+      delete this.events[event];
+    } else {
+      this.events = {};
+    }
+  }
+}
 
 /**
  * WebTorrent Transport Layer
- * Implements the AbstractTransport interface using WebTorrent's DHT and peer discovery.
+ * Implements peer-to-peer transport using WebTorrent's DHT and peer discovery.
  * Uses WebTorrent's SHA1-based peer IDs and swarms around a dummy torrent infoHash.
  */
-export class WebTorrentTransport extends AbstractTransport {
+export class WebTorrentTransport extends SimpleEventEmitter {
   constructor(infoHash, options = {}) {
     super();
     
@@ -22,12 +64,75 @@ export class WebTorrentTransport extends AbstractTransport {
     this.localPeerId = null;
     this.connectedPeers = new Map(); // peerId -> wire
     this.pendingKademliaRpcs = new Map(); // For tracking Kademlia RPC replies
-    this.sentHellos = new Set(); // Track peers we've sent hello messages to
     this.isConnected = false;
     this._cryptoModule = null; // Cache for crypto module
     
+    // Create the WebTorrent adapter
+    this.adapter = new WebTorrentAdapter(options);
+    this.setupAdapterEventHandlers();
+    
     // FIXED: Shorter timeouts for faster connection detection
     this.CONNECTION_TIMEOUT = 30000;
+  }
+
+  /**
+   * Sets up event handlers for the WebTorrent adapter
+   */
+  setupAdapterEventHandlers() {
+    // Forward adapter events to transport events
+    this.adapter.on('signal', (data) => {
+      console.log(`WebTorrent: Received signal from ${data.from}`);
+      this.emit('signal', data);
+    });
+
+    this.adapter.on('connect_request', (data) => {
+      console.log(`WebTorrent: Received connect request from ${data.from}`);
+      this.emit('connect_request', data);
+    });
+
+    this.adapter.on('peer_ready', (data) => {
+      console.log(`WebTorrent: Peer ${data.peerId} is ready`);
+      
+      // Track the peer
+      this.connectedPeers.set(data.peerId, true);
+      
+      // Emit peer discovery event FIRST
+      this.emit('peer_discovered', { 
+        peerId: data.peerId, 
+        address: data.peerId,
+        transport: 'webtorrent'
+      });
+      
+      // Then emit peer joined
+      this.emit('peer_joined', { peerId: data.peerId });
+      
+      // Also emit as bootstrap peer
+      this.emit('bootstrap_peers', { 
+        peers: [{ id: data.peerId, address: data.peerId }] 
+      });
+    });
+
+    this.adapter.on('peer_disconnected', (data) => {
+      this.connectedPeers.delete(data.peerId);
+      this.emit('peer_left', data);
+    });
+
+    this.adapter.on('kademlia_rpc_message', (data) => {
+      this.emit('kademlia_rpc_message', data);
+    });
+
+    this.adapter.on('kademlia_rpc_reply', (data) => {
+      const rpcId = data.rpcMessage?.inReplyTo;
+      if (rpcId && this.pendingKademliaRpcs.has(rpcId)) {
+        const { resolve } = this.pendingKademliaRpcs.get(rpcId);
+        resolve(data.rpcMessage);
+        this.pendingKademliaRpcs.delete(rpcId);
+      }
+    });
+
+    this.adapter.on('connection_rejected', (data) => {
+      this.emit('connection_rejected', data);
+    });
   }
 
   /**
@@ -254,31 +359,29 @@ export class WebTorrentTransport extends AbstractTransport {
         console.log(`Using P2PMesh peer ID: ${localPeerId}`);
         console.log(`Converted to bytes:`, Array.from(p2pmeshPeerIdBytes.slice(0, 10)).map(b => b.toString(16).padStart(2, '0')).join(''));
         
+        // Set up the adapter with our peer ID
+        this.adapter.setLocalPeerId(localPeerId);
+        
         // Force maximum uniqueness by adding more entropy sources
         const instanceId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}-${Math.random().toString(36).substr(2, 9)}`;
         
         // Create WebTorrent client with P2PMesh peer ID
         const clientOptionsWithPeerId = {
-          ...this.clientOptions,
+          ...this.options,
           peerId: p2pmeshPeerIdBytes,
-          // Add additional options to force uniqueness
-          nodeId: p2pmeshPeerIdBytes, // Some versions use nodeId instead of peerId
-          port: 0, // Use random port
-          dhtPort: 0, // Use random DHT port
-          // Add random user agent to further differentiate instances
+          nodeId: p2pmeshPeerIdBytes,
+          port: 0,
+          dhtPort: 0,
           userAgent: `P2PMesh-${instanceId}`,
-          // Add more random options to force different client instances
           downloadLimit: -1,
           uploadLimit: -1,
-          maxConns: 200 + Math.floor(Math.random() * 100), // Randomize max connections
-          // Force random DHT bootstrap nodes order and add more aggressive settings
+          maxConns: 200 + Math.floor(Math.random() * 100),
           dhtBootstrap: [
             'router.bittorrent.com:6881',
             'dht.transmissionbt.com:6881',
             'router.utorrent.com:6881',
             'dht.libtorrent.org:25401'
           ].sort(() => Math.random() - 0.5),
-          // Optimize DHT settings for faster peer discovery
           dhtPort: 0,
           dht: {
             bootstrap: [
@@ -286,11 +389,10 @@ export class WebTorrentTransport extends AbstractTransport {
               'dht.transmissionbt.com:6881',
               'router.utorrent.com:6881'
             ],
-            // More aggressive DHT settings
             concurrency: 16,
-            maxAge: 300000, // 5 minutes
-            timeBucketOutstanding: 5000, // 5 seconds
-            timeoutReqs: 5000 // 5 seconds
+            maxAge: 300000,
+            timeBucketOutstanding: 5000,
+            timeoutReqs: 5000
           }
         };
         
@@ -298,15 +400,11 @@ export class WebTorrentTransport extends AbstractTransport {
         
         this.client = new WebTorrent(clientOptionsWithPeerId);
         
-        // FORCE our P2PMesh peer ID - override WebTorrent's generated one
-        console.log(`Forcing WebTorrent to use P2PMesh peer ID: ${localPeerId}`);
-        
         // Use the P2PMesh peer ID as the final peer ID (as a string)
         this.localPeerId = localPeerId;
         
         // Override WebTorrent's properties with our peer ID
         try {
-          // Force all possible peer ID properties
           this.client.peerId = p2pmeshPeerIdBytes;
           this.client.nodeId = p2pmeshPeerIdBytes;
           if (this.client.dht) {
@@ -329,24 +427,24 @@ export class WebTorrentTransport extends AbstractTransport {
         this.client.on('torrent', (torrent) => {
           console.log(`WebTorrent: Torrent added: ${torrent.infoHash}`);
           
-          // Set up torrent-level wire handling
+          // Set up torrent-level wire handling - delegate to adapter
           torrent.on('wire', (wire) => {
             console.log(`WebTorrent: New wire connection from client-level torrent event`);
-            this.handleNewWire(wire);
+            this.adapter.handleNewWire(wire, this._formatPeerId(wire.peerId));
           });
           
-          // Periodically check for new peers (reduced interval for faster discovery)
+          // Periodically check for new peers
           const peerCheckInterval = setInterval(() => {
             if (torrent.wires && torrent.wires.length > 0) {
               console.log(`WebTorrent: Active wires: ${torrent.wires.length}`);
               torrent.wires.forEach((wire) => {
-                if (wire.peerId && !this.connectedPeers.has(this._formatPeerId(wire.peerId))) {
-                  console.log(`WebTorrent: Found new peer via periodic check`);
-                  this.handleNewWire(wire);
+                const formattedPeerId = this._formatPeerId(wire.peerId);
+                if (!this.connectedPeers.has(formattedPeerId)) {
+                  this.adapter.handleNewWire(wire, formattedPeerId);
                 }
               });
             }
-          }, 2000); // Reduced from 5000ms to 2000ms for faster peer discovery
+          }, 2000);
           
           // Clean up interval when torrent is destroyed
           torrent.on('destroy', () => {
@@ -368,11 +466,10 @@ export class WebTorrentTransport extends AbstractTransport {
             reject(err);
           });
 
-        // Timeout after 10 seconds (reduced from 20 for faster startup)
+        // Timeout after 10 seconds
         setTimeout(() => {
           if (!this.isConnected) {
             console.log('WebTorrent: Connection timeout, but proceeding with transport');
-            // Don't reject, just mark as connected and proceed
             this.isConnected = true;
             this.emit('open');
             resolve();
@@ -412,7 +509,7 @@ export class WebTorrentTransport extends AbstractTransport {
 
         this.torrent.on('wire', (wire) => {
           console.log(`WebTorrent: New peer connected to swarm`);
-          this.handleNewWire(wire);
+          this.adapter.handleNewWire(wire, this._formatPeerId(wire.peerId));
         });
 
         this.torrent.on('error', (err) => {
@@ -431,7 +528,7 @@ export class WebTorrentTransport extends AbstractTransport {
             console.log('WebTorrent: No existing peers found, seeding new torrent...');
             this.createAndSeedNewTorrent().then(resolve).catch(reject);
           }
-        }, 3000); // Reduced from 5000ms for faster fallback
+        }, 3000);
 
       } catch (error) {
         console.error('WebTorrent: Error in addDummyTorrent:', error);
@@ -459,17 +556,19 @@ export class WebTorrentTransport extends AbstractTransport {
           file = new File([fileData], fileName, { type: 'text/plain' });
         } else {
           // Node.js environment
-          const fileData = this.createBuffer(roomData, 'utf8');
+          const fileData = Buffer.from(roomData, 'utf8');
           file = {
             name: fileName,
             path: fileName,
             length: fileData.length,
             createReadStream: () => {
-              const { Readable } = require('stream');
-              const stream = new Readable();
-              stream.push(fileData);
-              stream.push(null);
-              return stream;
+              // Use dynamic import to avoid browser errors
+              return import('stream').then(({ Readable }) => {
+                const stream = new Readable();
+                stream.push(fileData);
+                stream.push(null);
+                return stream;
+              });
             }
           };
         }
@@ -499,8 +598,7 @@ export class WebTorrentTransport extends AbstractTransport {
           console.log(`WebTorrent: Target InfoHash: ${this.infoHash}`);
           console.log(`WebTorrent: Magnet URI: ${this.torrent.magnetURI}`);
           
-          // FIXED: Update our infoHash to match the generated torrent
-          // This ensures all peers with the same room name will use the same actual infoHash
+          // Update our infoHash to match the generated torrent
           console.log(`WebTorrent: Updating infoHash from ${this.infoHash} to ${this.torrent.infoHash}`);
           this.infoHash = this.torrent.infoHash;
           
@@ -509,7 +607,7 @@ export class WebTorrentTransport extends AbstractTransport {
 
         this.torrent.on('wire', (wire) => {
           console.log(`WebTorrent: New peer connected to our seeded torrent`);
-          this.handleNewWire(wire);
+          this.adapter.handleNewWire(wire, this._formatPeerId(wire.peerId));
         });
 
         this.torrent.on('error', (err) => {
@@ -523,7 +621,7 @@ export class WebTorrentTransport extends AbstractTransport {
             console.log('WebTorrent: Seeding timeout, but continuing anyway');
             resolve();
           }
-        }, 5000); // Reduced from 10000ms for faster startup
+        }, 5000);
 
       } catch (error) {
         console.error('WebTorrent: Error creating and seeding new torrent:', error);
@@ -542,13 +640,13 @@ export class WebTorrentTransport extends AbstractTransport {
       const fileContent = `P2PMesh room: ${this.infoHash}\nCreated: ${new Date().toISOString()}`;
       
       let fileData;
-      if (typeof Buffer !== 'undefined') {
-        // Node.js environment
-        fileData = Buffer.from(fileContent, 'utf8');
-      } else {
+      if (typeof window !== 'undefined') {
         // Browser environment
         const encoder = new TextEncoder();
         fileData = encoder.encode(fileContent);
+      } else {
+        // Node.js environment
+        fileData = Buffer.from(fileContent, 'utf8');
       }
 
       // Create a simple File object for WebTorrent
@@ -561,9 +659,9 @@ export class WebTorrentTransport extends AbstractTransport {
         file = {
           name: fileName,
           length: fileData.length,
-          createReadStream: () => {
-            // Return a readable stream for Node.js
-            const { Readable } = require('stream');
+          createReadStream: async () => {
+            // Use dynamic import to avoid browser errors
+            const { Readable } = await import('stream');
             const stream = new Readable();
             stream.push(fileData);
             stream.push(null);
@@ -580,456 +678,16 @@ export class WebTorrentTransport extends AbstractTransport {
   }
 
   /**
-   * Formats a WebTorrent peer ID to P2PMesh-compatible format
-   */
-  _formatPeerId(peerId) {
-    if (!peerId) return null;
-    
-    let formattedPeerId = peerId;
-    
-    // Convert Buffer or Uint8Array to hex string if needed
-    if (typeof peerId !== 'string') {
-      if (typeof Buffer !== 'undefined' && Buffer.isBuffer(peerId)) {
-        formattedPeerId = peerId.toString('hex');
-      } else if (peerId instanceof Uint8Array) {
-        formattedPeerId = Array.from(peerId).map(b => b.toString(16).padStart(2, '0')).join('');
-      } else if (Array.isArray(peerId)) {
-        formattedPeerId = Array.from(peerId).map(b => b.toString(16).padStart(2, '0')).join('');
-      } else {
-        formattedPeerId = String(peerId);
-      }
-    }
-    
-    // Ensure the peer ID is exactly 40 characters (20 bytes) for P2PMesh compatibility
-    if (formattedPeerId.length < 40) {
-      // Pad with zeros if too short
-      formattedPeerId = formattedPeerId.padEnd(40, '0');
-    } else if (formattedPeerId.length > 40) {
-      // Truncate if too long
-      formattedPeerId = formattedPeerId.substring(0, 40);
-    }
-    
-    return formattedPeerId;
-  }
-
-  /**
-   * Handles new wire connections from WebTorrent
-   */
-  handleNewWire(wire) {
-    let remotePeerId = this._formatPeerId(wire.peerId);
-    
-    if (!remotePeerId || remotePeerId === this.localPeerId) {
-      if (!remotePeerId) {
-        console.log(`WebTorrent: Generating temporary peer ID for wire without peer ID`);
-        remotePeerId = this.generateTempPeerId();
-      } else {
-        console.log(`WebTorrent: Ignoring wire to self`);
-        return;
-      }
-    }
-
-    // Check if we already have this peer
-    if (this.connectedPeers.has(remotePeerId)) {
-      console.log(`WebTorrent: Already have connection to peer ${remotePeerId}, ignoring duplicate wire`);
-      return;
-    }
-
-    console.log(`WebTorrent: New wire connection from peer: ${remotePeerId}`);
-    
-    // Store the wire connection
-    this.connectedPeers.set(remotePeerId, wire);
-
-    // Set up wire event handlers
-    wire.on('close', () => {
-      console.log(`WebTorrent: Wire closed for peer: ${remotePeerId}`);
-      this.connectedPeers.delete(remotePeerId);
-      this.sentHellos.delete(remotePeerId);
-      this.emit('peer_left', { peerId: remotePeerId });
-    });
-
-    wire.on('error', (err) => {
-      console.error(`WebTorrent: Wire error for peer ${remotePeerId}:`, err);
-      this.connectedPeers.delete(remotePeerId);
-      this.sentHellos.delete(remotePeerId);
-    });
-
-    // Handle extended protocol for P2PMesh messages
-    this.setupExtendedProtocol(wire, remotePeerId);
-
-    // Emit peer joined event - this will be picked up by P2PMesh's transport handlers
-    this.emit('peer_joined', { peerId: remotePeerId });
-    
-    // Also emit as bootstrap peers for P2PMesh's Kademlia bootstrapping
-    this.emit('bootstrap_peers', { 
-      peers: [{ id: remotePeerId, address: remotePeerId }] 
-    });
-  }
-
-  /**
-   * Generates a temporary peer ID if one is not available (P2PMesh compatible format)
-   */
-  generateTempPeerId() {
-    // Generate a 40-character hex string (20 bytes) compatible with P2PMesh
-    const randomBytes = new Uint8Array(20);
-    
-    if (typeof window !== 'undefined' && window.crypto && window.crypto.getRandomValues) {
-      // Browser environment
-      window.crypto.getRandomValues(randomBytes);
-    } else {
-      // Fallback random generation
-      for (let i = 0; i < 20; i++) {
-        randomBytes[i] = Math.floor(Math.random() * 256);
-      }
-    }
-    
-    return Array.from(randomBytes).map(b => b.toString(16).padStart(2, '0')).join('');
-  }
-
-  /**
-   * Sets up BitTorrent extended protocol for P2PMesh messages
-   */
-  setupExtendedProtocol(wire, remotePeerId) {
-    const extensionName = 'p2pmesh';
-    
-    try {
-      console.log(`WebTorrent: Setting up extension protocol with ${remotePeerId}`);
-      
-      // Create a proper WebTorrent extension constructor
-      const self = this;
-      function P2PMeshExtension(wire) {          // Handle incoming extension messages
-          this.onMessage = function(buf) {
-            try {
-              // Log receiving message without exposing content
-              console.log(`WebTorrent: Received raw extension message from ${remotePeerId}, length: ${buf?.length || 0} bytes`);
-              
-              // Convert buffer to string with proper encoding
-              let messageStr;
-              if (typeof Buffer !== 'undefined' && Buffer.isBuffer(buf)) {
-                messageStr = buf.toString('utf8');
-              } else if (buf instanceof Uint8Array) {
-                messageStr = new TextDecoder('utf8').decode(buf);
-              } else {
-                messageStr = buf.toString();
-              }
-              
-              // Clean up the message string - remove any null bytes or extra characters
-              messageStr = messageStr.trim().replace(/\0/g, '');
-              
-              // Find the JSON part if there are extra bytes
-              let jsonStart = messageStr.indexOf('{');
-              let jsonEnd = messageStr.lastIndexOf('}');
-              
-              if (jsonStart !== -1 && jsonEnd !== -1 && jsonEnd > jsonStart) {
-                messageStr = messageStr.substring(jsonStart, jsonEnd + 1);
-              }
-              
-              // Parse the message without logging the full content
-              const message = JSON.parse(messageStr);
-              console.log(`WebTorrent: Parsed extension message from ${remotePeerId}, type: ${message.type || 'unknown'}`);
-              self.handleP2PMeshMessage(remotePeerId, message);
-            } catch (error) {
-              console.error(`Failed to parse P2PMesh message from ${remotePeerId}:`, error.message);
-              // Don't log the raw buffer content to avoid leaking sensitive data
-              console.error(`Error occurred while processing a ${buf?.length || 0}-byte message`);
-            }
-          };
-        
-        // Send method for the extension
-        this.send = function(message) {
-          try {
-            // Log only the message type, not the full content
-            console.log(`WebTorrent: Sending extension message to ${remotePeerId}, type: ${message.type || 'unknown'}`);
-            
-            const messageText = JSON.stringify(message);
-            let messageBuffer;
-            
-            if (typeof Buffer !== 'undefined') {
-              messageBuffer = Buffer.from(messageText, 'utf8');
-            } else {
-              const encoder = new TextEncoder();
-              messageBuffer = encoder.encode(messageText);
-            }
-            
-            console.log(`WebTorrent: Prepared message buffer for ${remotePeerId}, length: ${messageBuffer.length} bytes`);
-            
-            wire.extended(extensionName, messageBuffer);
-            console.log(`WebTorrent: Extension message sent to ${remotePeerId}`);
-          } catch (error) {
-            console.error(`WebTorrent: Failed to send extension message:`, error.message);
-          }
-        };
-      }
-      
-      // Set the extension name on the constructor
-      P2PMeshExtension.prototype.name = extensionName;
-      
-      // Register the extension with WebTorrent
-      if (wire.use && typeof wire.use === 'function') {
-        try {
-          wire.use(P2PMeshExtension);
-          console.log(`WebTorrent: Successfully registered p2pmesh extension for ${remotePeerId}`);
-        } catch (useError) {
-          console.error(`WebTorrent: Failed to use extension for ${remotePeerId}:`, useError);
-          this.setupFallbackExtension(wire, remotePeerId, extensionName);
-        }
-      } else {
-        // Fallback: manually set up extension handling
-        console.log(`WebTorrent: Wire.use not available, using fallback extension setup for ${remotePeerId}`);
-        this.setupFallbackExtension(wire, remotePeerId, extensionName);
-      }
-
-      // Store extension info for sending
-      wire._p2pmeshExtension = extensionName;
-      wire._p2pmeshSend = (message) => {
-        try {
-          // Log only the message type for privacy
-          console.log(`WebTorrent: Preparing to send message to ${remotePeerId}, type: ${message.type || 'unknown'}`);
-          
-          const messageText = JSON.stringify(message);
-          let messageBuffer;
-          
-          if (typeof Buffer !== 'undefined') {
-            messageBuffer = Buffer.from(messageText);
-          } else {
-            const encoder = new TextEncoder();
-            messageBuffer = encoder.encode(messageText);
-          }
-          
-          // Try to send via extension
-          if (wire.extended) {
-            wire.extended(extensionName, messageBuffer);
-            console.log(`WebTorrent: Extension message sent to ${remotePeerId}`);
-          } else {
-            console.warn(`WebTorrent: No extended method available for ${remotePeerId}`);
-          }
-        } catch (error) {
-          console.error(`WebTorrent: Failed to send extension message to ${remotePeerId}:`, error.message);
-        }
-      };
-      
-      // Wait briefly for handshake to complete, then send hello message (reduced delay)
-      setTimeout(() => {
-        this.sendHelloMessage(remotePeerId);
-      }, 200); // Reduced from 1000ms for faster handshake
-      
-    } catch (error) {
-      console.error(`WebTorrent: Failed to setup extension protocol with ${remotePeerId}:`, error);
-      // Use fallback extension setup
-      this.setupFallbackExtension(wire, remotePeerId, extensionName);
-    }
-  }
-
-  /**
-   * Sets up fallback extension handling when wire.use() fails
-   */
-  setupFallbackExtension(wire, remotePeerId, extensionName) {
-    try {
-      console.log(`WebTorrent: Setting up fallback extension for ${remotePeerId}`);
-      
-      // Register extension in handshake
-      if (!wire.extendedHandshake) {
-        wire.extendedHandshake = {};
-      }
-      wire.extendedHandshake[extensionName] = 1;
-
-      // Handle extended messages
-      wire.on('extended', (ext, buf) => {
-        if (ext === extensionName || (typeof ext === 'number' && wire.peerExtendedMapping && wire.peerExtendedMapping[ext] === extensionName)) {
-          try {
-            // Safely handle the message by parsing with minimal logging
-            const message = JSON.parse(buf.toString());
-            console.log(`WebTorrent: Received fallback extension message from ${remotePeerId}, type: ${message.type || 'unknown'}`);
-            this.handleP2PMeshMessage(remotePeerId, message);
-          } catch (error) {
-            console.error(`Failed to parse P2PMesh message from ${remotePeerId}:`, error.message);
-          }
-        }
-      });
-      
-      console.log(`WebTorrent: Fallback extension setup complete for ${remotePeerId}`);
-      
-    } catch (error) {
-      console.error(`WebTorrent: Failed to setup fallback extension for ${remotePeerId}:`, error);
-    }
-  }
-
-  /**
-   * Sends initial hello message to establish P2PMesh communication
-   */
-  sendHelloMessage(remotePeerId) {
-    // Prevent duplicate hello messages
-    if (this.sentHellos.has(remotePeerId)) {
-      return;
-    }
-    
-    console.log(`WebTorrent: Sending hello message to peer ${remotePeerId}`);
-    
-    const helloMessage = {
-      type: 'hello',
-      from: this.localPeerId,
-      timestamp: Date.now(),
-      p2pmeshProtocol: '1.0'
-    };
-    
-    this.send(remotePeerId, helloMessage);
-    this.sentHellos.add(remotePeerId);
-    
-    // Remove automatic connect request - let the hello/hello_response flow handle initiation
-    // setTimeout(() => {
-    //   console.log(`WebTorrent: Sending connect request to peer ${remotePeerId}`);
-    //   this.send(remotePeerId, {
-    //     type: 'connect_request',
-    //     from: this.localPeerId
-    //   });
-    // }, 200);
-  }
-
-  /**
-   * Determines if this peer should initiate connection based on peer ID comparison
-   */
-  shouldInitiateConnection(remotePeerId) {
-    // Only the peer with the lexicographically higher ID should initiate
-    return this.localPeerId > remotePeerId;
-  }
-
-  /**
-   * Handles P2PMesh protocol messages received via WebTorrent
-   */
-  handleP2PMeshMessage(fromPeerId, message) {
-    // Log only the message type and peer ID to avoid exposing sensitive message contents
-    console.log(`WebTorrent: Received P2PMesh message from ${fromPeerId}, type: ${message.type || 'unknown'}`);
-
-    switch (message.type) {
-      case 'hello':
-        console.log(`WebTorrent: Received hello from ${fromPeerId}, sending response`);
-        // Respond with our own hello response
-        this.sendHelloResponse(fromPeerId);
-        break;
-        
-      case 'hello_response':
-        console.log(`WebTorrent: Received hello response from ${fromPeerId}`);
-        // Mark peer as ready for P2PMesh communication
-        this.markPeerReady(fromPeerId);
-        // FIXED: Only initiate if we should be the initiator AND we're not already connecting
-        if (this.shouldInitiateConnection(fromPeerId)) {
-          setTimeout(() => {
-            console.log(`WebTorrent: Initiating connect request to ${fromPeerId} (we are initiator)`);
-            this.send(fromPeerId, {
-              type: 'connect_request',
-              from: this.localPeerId
-            });
-          }, 100); // Small delay to avoid immediate race
-        } else {
-          console.log(`WebTorrent: Waiting for connect request from ${fromPeerId} (they are initiator)`);
-        }
-        break;
-
-      case 'signal':
-        this.emit('signal', {
-          from: fromPeerId,
-          signal: message.signal
-        });
-        break;
-
-      case 'connect_request':
-        console.log(`WebTorrent: Received connect request from ${fromPeerId}`);
-        // FIXED: Deterministic conflict resolution based on peer ID comparison
-        if (this.shouldInitiateConnection(fromPeerId)) {
-          // We should be the initiator - reject their request and send our own
-          console.log(`WebTorrent: Rejecting connect request from ${fromPeerId}, we should initiate (${this.localPeerId} > ${fromPeerId})`);
-          this.send(fromPeerId, {
-            type: 'connection_rejected',
-            from: this.localPeerId,
-            reason: 'initiator_conflict'
-          });
-          // Send our own connect request after a brief delay
-          setTimeout(() => {
-            console.log(`WebTorrent: Sending our own connect request to ${fromPeerId}`);
-            this.send(fromPeerId, {
-              type: 'connect_request',
-              from: this.localPeerId
-            });
-          }, 200);
-        } else {
-          // They should be the initiator - accept their request
-          console.log(`WebTorrent: Accepting connect request from ${fromPeerId} (they are initiator: ${fromPeerId} > ${this.localPeerId})`);
-          this.emit('connect_request', {
-            from: fromPeerId,
-            data: message.data
-          });
-        }
-        break;
-
-      case 'kademlia_rpc':
-        // Process Kademlia RPC messages
-        console.log(`WebTorrent: Received Kademlia RPC from ${fromPeerId}, type: ${message.rpcMessage?.type || 'unknown'}`);
-        this.emit('kademlia_rpc_message', {
-          from: fromPeerId,
-          rpcMessage: message.rpcMessage
-        });
-        break;
-
-      case 'kademlia_rpc_reply':
-        // Process Kademlia RPC replies
-        console.log(`WebTorrent: Received Kademlia RPC reply from ${fromPeerId}`);
-        const rpcId = message.rpcMessage?.inReplyTo;
-        if (rpcId && this.pendingKademliaRpcs.has(rpcId)) {
-          const { resolve } = this.pendingKademliaRpcs.get(rpcId);
-          resolve(message.rpcMessage);
-          this.pendingKademliaRpcs.delete(rpcId);
-        } else {
-          console.warn(`WebTorrent: Received Kademlia RPC reply with unknown or missing rpcId`);
-        }
-        break;
-
-      case 'connection_rejected':
-        console.log(`WebTorrent: Connection rejected by ${fromPeerId}, reason: ${message.reason}`);
-        // Don't emit rejection for initiator conflicts - this is expected behavior
-        if (message.reason !== 'initiator_conflict') {
-          this.emit('connection_rejected', {
-            from: fromPeerId,
-            reason: message.reason,
-            alternatives: message.alternatives
-          });
-        }
-        break;
-
-      default:
-        console.warn(`WebTorrent: Unknown P2PMesh message type: ${message.type}`);
-    }
-  }
-
-  /**
-   * Sends hello response message
-   */
-  sendHelloResponse(remotePeerId) {
-    console.log(`WebTorrent: Sending hello response to peer ${remotePeerId}`);
-    
-    const response = {
-      type: 'hello_response',
-      from: this.localPeerId,
-      timestamp: Date.now(),
-      p2pmeshProtocol: '1.0'
-    };
-    
-    this.send(remotePeerId, response);
-    this.sentHellos.add(remotePeerId);
-  }
-
-  /**
-   * Marks a peer as ready for P2PMesh communication
-   */
-  markPeerReady(peerId) {
-    console.log(`WebTorrent: Peer ${peerId} is ready for P2PMesh communication`);
-    // This peer has completed the handshake and is ready for WebRTC signaling
-  }
-
-  /**
    * Disconnects from the WebTorrent network
    */
   async disconnect() {
     return new Promise((resolve) => {
       this.isConnected = false;
+
+      // Disconnect the adapter first
+      if (this.adapter) {
+        this.adapter.disconnect();
+      }
 
       if (this.torrent) {
         this.torrent.destroy(() => {
@@ -1051,7 +709,6 @@ export class WebTorrentTransport extends AbstractTransport {
 
       this.connectedPeers.clear();
       this.pendingKademliaRpcs.clear();
-      this.sentHellos.clear();
     });
   }
 
@@ -1059,95 +716,56 @@ export class WebTorrentTransport extends AbstractTransport {
    * Sends a message to a specific peer via WebTorrent wire protocol
    */
   send(toPeerId, message) {
-    const wire = this.connectedPeers.get(toPeerId);
-    
-    if (!wire) {
-      console.warn(`WebTorrent: No wire connection to peer ${toPeerId}`);
+    if (!this.adapter) {
+      console.warn(`WebTorrent: Adapter not available`);
       return false;
     }
 
-    try {
-      // Log only the message type for privacy
-      console.log(`WebTorrent: Sending message to ${toPeerId}, type: ${message.type || 'unknown'}`);
-      
-      // Use the improved extension sender if available
-      if (wire._p2pmeshSend) {
-        wire._p2pmeshSend(message);
-        return true;
-      }
-      
-      // Fallback to manual extension sending
-      const messageText = JSON.stringify(message);
-      let messageBuffer;
-      
-      if (typeof Buffer !== 'undefined') {
-        // Node.js environment
-        messageBuffer = Buffer.from(messageText);
-      } else {
-        // Browser environment - use Uint8Array
-        const encoder = new TextEncoder();
-        messageBuffer = encoder.encode(messageText);
-      }
-      
-      // Send via BitTorrent extended protocol
-      if (wire._p2pmeshExtension && wire.extended) {
-        wire.extended(wire._p2pmeshExtension, messageBuffer);
-        console.log(`WebTorrent: Sent fallback extension message to ${toPeerId}, type: ${message.type || 'unknown'}`);
-        return true;
-      } else {
-        console.warn(`WebTorrent: P2PMesh extension not available for peer ${toPeerId}`);
-        return false;
-      }
-    } catch (error) {
-      console.error(`WebTorrent: Failed to send message to ${toPeerId}:`, error);
-      return false;
-    }
+    return this.adapter.send(toPeerId, message);
   }
 
   /**
    * Sends a Kademlia RPC message and waits for a reply
    */
   async sendKademliaRpc(toPeerId, kademliaRpcMessage) {
-    return new Promise((resolve, reject) => {
-      const rpcId = this.generateRpcId();
-      const timeoutMs = 5000; // 5 second timeout
+    if (!this.adapter) {
+      throw new Error('WebTorrent adapter not available');
+    }
 
-      // Store the pending RPC
-      const timeout = setTimeout(() => {
-        this.pendingKademliaRpcs.delete(rpcId);
-        reject(new Error(`Kademlia RPC timeout for peer ${toPeerId}`));
-      }, timeoutMs);
+    // Use the adapter but also track the pending RPC for timeout handling
+    const rpcId = this.generateRpcId();
+    const timeoutMs = 5000;
 
-      this.pendingKademliaRpcs.set(rpcId, {
-        resolve: (reply) => {
-          clearTimeout(timeout);
-          resolve(reply);
-        },
-        reject: (error) => {
-          clearTimeout(timeout);
-          reject(error);
-        }
-      });
+    // Store the pending RPC in transport for consistency
+    const timeout = setTimeout(() => {
+      this.pendingKademliaRpcs.delete(rpcId);
+    }, timeoutMs);
 
-      // Send the RPC message
-      const message = {
-        type: 'kademlia_rpc',
-        rpcMessage: {
-          ...kademliaRpcMessage,
-          rpcId: rpcId
-        }
-      };
-
-      // Log sending RPC but avoid exposing the full message content
-      console.log(`WebTorrent: Sending Kademlia RPC to ${toPeerId}, type: ${kademliaRpcMessage.type || 'unknown'}, rpcId: ${rpcId}`);
-      
-      const sent = this.send(toPeerId, message);
-      if (!sent) {
+    this.pendingKademliaRpcs.set(rpcId, {
+      resolve: (reply) => {
         clearTimeout(timeout);
-        this.pendingKademliaRpcs.delete(rpcId);
-        reject(new Error(`Failed to send Kademlia RPC to peer ${toPeerId}`));
+      },
+      reject: (error) => {
+        clearTimeout(timeout);
       }
     });
+
+    // Add rpcId to the message if not present
+    const messageWithRpcId = {
+      ...kademliaRpcMessage,
+      rpcId: rpcId
+    };
+
+    try {
+      const result = await this.adapter.sendKademliaRpc(toPeerId, messageWithRpcId);
+      this.pendingKademliaRpcs.delete(rpcId);
+      clearTimeout(timeout);
+      return result;
+    } catch (error) {
+      this.pendingKademliaRpcs.delete(rpcId);
+      clearTimeout(timeout);
+      throw error;
+    }
   }
 
   /**
@@ -1155,77 +773,6 @@ export class WebTorrentTransport extends AbstractTransport {
    */
   getPeerAddress(peerId) {
     return peerId; // WebTorrent peer ID is the address
-  }
-
-  /**
-   * Discovers peers through WebTorrent's DHT and swarm
-   */
-  discoverPeers(bootstrapUrls = []) {
-    if (!this.torrent) {
-      console.warn('WebTorrent: Cannot discover peers, not connected to swarm');
-      return;
-    }
-
-    // WebTorrent automatically discovers peers through DHT and trackers
-    console.log(`WebTorrent: Active peer discovery through DHT and swarm`);
-    console.log(`WebTorrent: Current swarm size: ${this.torrent.wires.length} peers`);
-    
-    // Emit current peers as bootstrap peers with P2PMesh-compatible format
-    const currentPeers = Array.from(this.connectedPeers.keys()).map(peerId => {
-      const formattedPeerId = this._formatPeerId(peerId);
-      return formattedPeerId;
-    }).filter(Boolean); // Remove any null/undefined peer IDs
-    
-    if (currentPeers.length > 0) {
-      console.log(`WebTorrent: Emitting ${currentPeers.length} bootstrap peers:`, currentPeers.slice(0, 3).map(p => p.substring(0, 8)));
-      
-      // Emit as both individual peer events and bootstrap batch
-      currentPeers.forEach(peerId => {
-        this.emit('peer_discovered', { 
-          peerId: peerId, 
-          address: peerId,
-          transport: 'webtorrent'
-        });
-      });
-      
-      this.emit('bootstrap_peers', { 
-        peers: currentPeers.map(peerId => ({ 
-          id: peerId, 
-          address: peerId 
-        }))
-      });
-    }
-    
-    // Force torrent to re-announce to trackers
-    if (this.torrent && this.torrent.discovery) {
-      try {
-        // Check what methods are available on the discovery object
-        if (typeof this.torrent.discovery.updateInterest === 'function') {
-          this.torrent.discovery.updateInterest();
-          console.log(`WebTorrent: Forced re-announce to trackers via discovery.updateInterest`);
-        } else if (typeof this.torrent.discovery.announce === 'function') {
-          this.torrent.discovery.announce();
-          console.log(`WebTorrent: Forced re-announce to trackers via discovery.announce`);
-        } else {
-          // Fallback: try to restart discovery
-          if (typeof this.torrent.discovery.restart === 'function') {
-            this.torrent.discovery.restart();
-            console.log(`WebTorrent: Restarted discovery for re-announce`);
-          } else {
-            console.log(`WebTorrent: No suitable discovery method available for re-announce`);
-          }
-        }
-      } catch (e) {
-        console.warn(`WebTorrent: Failed to force re-announce via discovery:`, e.message);
-      }
-    } else if (this.torrent && typeof this.torrent.announce === 'function') {
-      try {
-        this.torrent.announce();
-        console.log(`WebTorrent: Forced announce to trackers`);
-      } catch (e) {
-        console.warn(`WebTorrent: Failed to force announce:`, e.message);
-      }
-    }
   }
 
   /**
@@ -1262,5 +809,142 @@ export class WebTorrentTransport extends AbstractTransport {
         uploaded: this.torrent.uploaded
       } : null
     };
+  }
+
+  /**
+   * Formats a WebTorrent peer ID to P2PMesh-compatible format
+   */
+  _formatPeerId(peerId) {
+    if (!peerId) return null;
+    
+    let formattedPeerId = peerId;
+    
+    // Convert Buffer or Uint8Array to hex string if needed
+    if (typeof peerId !== 'string') {
+      if (typeof Buffer !== 'undefined' && Buffer.isBuffer(peerId)) {
+        formattedPeerId = peerId.toString('hex');
+      } else if (peerId instanceof Uint8Array) {
+        formattedPeerId = Array.from(peerId).map(b => b.toString(16).padStart(2, '0')).join('');
+      } else if (Array.isArray(peerId)) {
+        formattedPeerId = Array.from(peerId).map(b => b.toString(16).padStart(2, '0')).join('');
+      } else {
+        formattedPeerId = String(peerId);
+      }
+    }
+    
+    // Ensure the peer ID is exactly 40 characters (20 bytes) for P2PMesh compatibility
+    if (formattedPeerId.length < 40) {
+      // Pad with zeros if too short
+      formattedPeerId = formattedPeerId.padEnd(40, '0');
+    } else if (formattedPeerId.length > 40) {
+      // Truncate if too long
+      formattedPeerId = formattedPeerId.substring(0, 40);
+    }
+    
+    return formattedPeerId;
+  }
+
+  /**
+   * Discovers peers through WebTorrent's DHT and swarm
+   */
+  discoverPeers(bootstrapUrls = []) {
+    if (!this.torrent) {
+      console.warn('WebTorrent: Cannot discover peers, not connected to swarm');
+      return;
+    }
+
+    // WebTorrent automatically discovers peers through DHT and trackers
+    console.log(`WebTorrent: Active peer discovery through DHT and swarm`);
+    console.log(`WebTorrent: Current swarm size: ${this.torrent.wires.length} peers`);
+    
+    // Check for active wires and emit them as discovered peers
+    if (this.torrent.wires && this.torrent.wires.length > 0) {
+      console.log(`WebTorrent: Found ${this.torrent.wires.length} active wires, processing as discovered peers`);
+      
+      this.torrent.wires.forEach((wire) => {
+        const formattedPeerId = this._formatPeerId(wire.peerId);
+        if (formattedPeerId && formattedPeerId !== this.localPeerId) {
+          console.log(`WebTorrent: Emitting wire ${formattedPeerId} as discovered peer`);
+          
+          // Emit peer discovery event
+          this.emit('peer_discovered', { 
+            peerId: formattedPeerId, 
+            address: formattedPeerId,
+            transport: 'webtorrent'
+          });
+          
+          // Make sure the adapter handles this wire if it hasn't already
+          if (!this.adapter.hasPeer(formattedPeerId)) {
+            this.adapter.handleNewWire(wire, formattedPeerId);
+          }
+        }
+      });
+    }
+    
+    // Emit current connected peers as discovered
+    const currentPeers = Array.from(this.connectedPeers.keys()).map(peerId => {
+      const formattedPeerId = this._formatPeerId(peerId);
+      return formattedPeerId;
+    }).filter(Boolean);
+    
+    if (currentPeers.length > 0) {
+      console.log(`WebTorrent: Emitting ${currentPeers.length} connected peers as discovered:`, currentPeers.slice(0, 3).map(p => p.substring(0, 8)));
+      
+      // Emit as individual peer discovery events
+      currentPeers.forEach(peerId => {
+        this.emit('peer_discovered', { 
+          peerId: peerId, 
+          address: peerId,
+          transport: 'webtorrent'
+        });
+      });
+      
+      // Also emit as bootstrap batch
+      this.emit('bootstrap_peers', { 
+        peers: currentPeers.map(peerId => ({ 
+          id: peerId, 
+          address: peerId 
+        }))
+      });
+    }
+    
+    // Also emit adapter's connected peers
+    const adapterPeers = this.adapter.getConnectedPeers();
+    if (adapterPeers.length > 0) {
+      console.log(`WebTorrent: Emitting ${adapterPeers.length} adapter peers as discovered:`, adapterPeers.slice(0, 3).map(p => p.substring(0, 8)));
+      
+      adapterPeers.forEach(peerId => {
+        this.emit('peer_discovered', { 
+          peerId: peerId, 
+          address: peerId,
+          transport: 'webtorrent'
+        });
+      });
+    }
+    
+    // Force torrent to re-announce to trackers
+    if (this.torrent && this.torrent.discovery) {
+      try {
+        // Check what methods are available on the discovery object
+        if (typeof this.torrent.discovery.updateInterest === 'function') {
+          this.torrent.discovery.updateInterest();
+          console.log(`WebTorrent: Forced re-announce to trackers via discovery.updateInterest`);
+        } else if (typeof this.torrent.discovery.announce === 'function') {
+          this.torrent.discovery.announce();
+          console.log(`WebTorrent: Forced re-announce to trackers via discovery.announce`);
+        } else {
+          console.log(`WebTorrent: No specific discovery methods available, torrent will use default discovery`);
+        }
+      } catch (e) {
+        console.warn(`WebTorrent: Failed to force re-announce via discovery:`, e.message);
+      }
+    } else if (this.torrent && typeof this.torrent.announce === 'function') {
+      try {
+        this.torrent.announce();
+        console.log(`WebTorrent: Forced announce to trackers`);
+      } catch (e) {
+        console.warn(`WebTorrent: Failed to force announce:`, e.message);
+      }
+    }
   }
 }

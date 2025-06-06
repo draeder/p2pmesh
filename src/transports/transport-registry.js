@@ -84,12 +84,48 @@ const registry = new TransportRegistry();
 import { WebSocketTransport } from './websocket-transport.js';
 import { WebTorrentTransport } from './webtorrent-transport.js';
 
+// Import adapters for reference
+import { WebTorrentAdapter } from '../adapters/webtorrent-adapter.js';
+
 // Register all built-in transports
 registry.register('websocket', WebSocketTransport);
 registry.register('webtorrent', WebTorrentTransport);
 
-// Auto-register any additional transports that might be added in the future
-// This is a hook for module developers to register their transports
+// Keep track of available adapters
+registry.adapters = new Map();
+registry.adapters.set('webtorrent', WebTorrentAdapter);
+
+/**
+ * Register an adapter for use with transports
+ * @param {string} name - The name to register the adapter under
+ * @param {Function} adapterClass - The adapter class constructor
+ */
+registry.registerAdapter = function(name, adapterClass) {
+  this.adapters.set(name, adapterClass);
+};
+
+/**
+ * Get an adapter by name
+ * @param {string} name - The name of the adapter to retrieve
+ * @returns {Function|null} The adapter class constructor or null if not found
+ */
+registry.getAdapter = function(name) {
+  return this.adapters.get(name) || null;
+};
+
+/**
+ * Create a new adapter instance
+ * @param {string} name - The name of the adapter to create
+ * @param {...any} args - Arguments to pass to the adapter constructor
+ * @returns {object|null} A new instance of the adapter or null if not found
+ */
+registry.createAdapter = function(name, ...args) {
+  const AdapterClass = this.getAdapter(name);
+  if (!AdapterClass) {
+    return null;
+  }
+  return new AdapterClass(...args);
+};
 
 /**
  * Helper function to get a transport instance with proper configuration
