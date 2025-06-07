@@ -20,6 +20,47 @@ terraform {
   }
 }
 
+# Import existing resources that already exist in AWS
+import {
+  to = aws_dynamodb_table.connections
+  id = "p2pmesh-signaling-connections-prod"
+}
+
+import {
+  to = aws_cloudwatch_log_group.lambda_logs
+  id = "/aws/lambda/p2pmesh-signaling-prod"
+}
+
+import {
+  to = aws_iam_role.lambda_role
+  id = "p2pmesh-signaling-lambda-role-prod"
+}
+
+import {
+  to = aws_lambda_function.signaling_server
+  id = "p2pmesh-signaling-prod"
+}
+
+import {
+  to = aws_iam_role_policy.lambda_apigateway
+  id = "p2pmesh-signaling-lambda-role-prod:p2pmesh-signaling-lambda-apigateway-policy-prod"
+}
+
+import {
+  to = aws_iam_role_policy.lambda_dynamodb
+  id = "p2pmesh-signaling-lambda-role-prod:p2pmesh-signaling-lambda-dynamodb-policy-prod"
+}
+
+import {
+  to = aws_iam_role_policy_attachment.lambda_basic
+  id = "p2pmesh-signaling-lambda-role-prod/arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+
+import {
+  to = aws_lambda_permission.apigateway_lambda
+  id = "p2pmesh-signaling-prod/AllowExecutionFromAPIGateway"
+}
+
 provider "aws" {
   region = var.aws_region
 }
@@ -63,6 +104,37 @@ data "archive_file" "lambda_zip" {
   depends_on = [null_resource.lambda_dependencies]
 }
 
+# Lambda function
+resource "aws_lambda_function" "signaling_server" {
+  filename         = data.archive_file.lambda_zip.output_path
+  function_name    = "${var.project_name}-${var.stage}"
+  role            = aws_iam_role.lambda_role.arn
+  handler         = "index.handler"
+  runtime         = "nodejs18.x"
+  timeout         = var.lambda_timeout
+  memory_size     = var.lambda_memory_size
+
+  source_code_hash = data.archive_file.lambda_zip.output_base64sha256
+
+  environment {
+    variables = {
+      STAGE             = var.stage
+      REGION            = var.aws_region
+      CONNECTIONS_TABLE = aws_dynamodb_table.connections.name
+    }
+  }
+
+  depends_on = [
+    aws_iam_role_policy_attachment.lambda_basic,
+    aws_iam_role_policy.lambda_dynamodb,
+    aws_cloudwatch_log_group.lambda_logs,
+  ]
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
 # DynamoDB table for connection state
 resource "aws_dynamodb_table" "connections" {
   name           = "${var.project_name}-connections-${var.stage}"
@@ -83,6 +155,10 @@ resource "aws_dynamodb_table" "connections" {
     Name        = "${var.project_name}-connections-${var.stage}"
     Environment = var.stage
     Project     = var.project_name
+  }
+
+  lifecycle {
+    create_before_destroy = true
   }
 }
 
@@ -112,37 +188,14 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "lambda_deployment
   }
 }
 
-# Lambda function
-resource "aws_lambda_function" "signaling_server" {
-  filename         = data.archive_file.lambda_zip.output_path
-  function_name    = "${var.project_name}-${var.stage}"
-  role            = aws_iam_role.lambda_role.arn
-  handler         = "index.handler"
-  runtime         = "nodejs18.x"
-  timeout         = var.lambda_timeout
-  memory_size     = var.lambda_memory_size
-
-  source_code_hash = data.archive_file.lambda_zip.output_base64sha256
-
-  environment {
-    variables = {
-      STAGE             = var.stage
-      REGION            = var.aws_region
-      CONNECTIONS_TABLE = aws_dynamodb_table.connections.name
-    }
-  }
-
-  depends_on = [
-    aws_iam_role_policy_attachment.lambda_basic,
-    aws_iam_role_policy.lambda_dynamodb,
-    aws_cloudwatch_log_group.lambda_logs,
-  ]
-}
-
 # CloudWatch Log Group
 resource "aws_cloudwatch_log_group" "lambda_logs" {
   name              = "/aws/lambda/${var.project_name}-${var.stage}"
   retention_in_days = 14
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 # IAM Role for Lambda
@@ -161,6 +214,10 @@ resource "aws_iam_role" "lambda_role" {
       }
     ]
   })
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 # Basic Lambda execution policy
@@ -297,6 +354,16 @@ output "websocket_url" {
 output "websocket_api_endpoint" {
   description = "API Gateway WebSocket endpoint (without protocol)"
   value       = "${aws_apigatewayv2_api.websocket_api.id}.execute-api.${var.aws_region}.amazonaws.com/${var.stage}"
+}
+
+output "api_gateway_info" {
+  description = "API Gateway configuration details"
+  value = {
+    api_id = aws_apigatewayv2_api.websocket_api.id
+    region = var.aws_region
+    stage  = var.stage
+    url    = "wss://${aws_apigatewayv2_api.websocket_api.id}.execute-api.${var.aws_region}.amazonaws.com/${var.stage}"
+  }
 }
 
 output "lambda_function_name" {
