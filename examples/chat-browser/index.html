@@ -5,65 +5,406 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>P2PMesh Chat Example</title>
     <style>
-        body { font-family: sans-serif; margin: 20px; background-color: #f4f4f4; color: #333; }
-        #chatContainer { max-width: 600px; margin: auto; background-color: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
-        #messages { list-style-type: none; padding: 0; margin: 0 0 20px 0; height: 300px; overflow-y: scroll; border: 1px solid #ddd; border-radius: 4px; padding: 10px; background-color: #f9f9f9; }
-        #messages li { padding: 8px 12px; margin-bottom: 8px; border-radius: 4px; word-wrap: break-word; }
-        #messages li.local { background-color: #dcf8c6; text-align: right; margin-left: auto; max-width: 70%; }
-        #messages li.remote { background-color: #e9e9eb; text-align: left; margin-right: auto; max-width: 70%; }
-        #messageForm { display: flex; margin-bottom: 10px; }
-        #messageInput { flex-grow: 1; padding: 10px; border: 1px solid #ddd; border-radius: 4px 0 0 4px; }
-        #messageForm button { padding: 10px 15px; background-color: #007bff; color: white; border: none; cursor: pointer; border-radius: 0 4px 4px 0; }
-        #messageForm button:hover { background-color: #0056b3; }
-        #status { margin-bottom: 10px; font-style: italic; color: #666; }
-        #peerIdDisplay { margin-bottom: 10px; font-weight: bold; }
-        .peer-info { font-size: 0.9em; color: #555; }
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        
+        .container {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        
+        .settings-panel {
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 5px;
+            padding: 15px;
+            margin-bottom: 20px;
+        }
+        
+        .transport-settings {
+            margin: 10px 0;
+        }
+        
+        .transport-settings label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        
+        .transport-settings input, .transport-settings select {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            margin-bottom: 10px;
+        }
+        
+        .additional-server {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin: 5px 0;
+        }
+        
+        .additional-server input {
+            flex: 1;
+            margin-bottom: 0;
+        }
+        
+        .remove-server-btn {
+            background: #dc3545;
+            color: white;
+            border: none;
+            padding: 8px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        
+        .remove-server-btn:hover {
+            background: #c82333;
+        }
+        
+        #addServerBtn {
+            background: #28a745;
+            color: white;
+            border: none;
+            padding: 8px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-top: 5px;
+        }
+        
+        #addServerBtn:hover {
+            background: #218838;
+        }
+        
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        
+        button:hover {
+            background: #0056b3;
+        }
+        
+        button:disabled {
+            background: #6c757d;
+            cursor: not-allowed;
+        }
+        
+        #messages {
+            height: 300px;
+            overflow-y: auto;
+            border: 1px solid #ccc;
+            padding: 10px;
+            margin: 10px 0;
+            background: white;
+            list-style: none;
+            margin: 10px 0;
+            padding: 0;
+        }
+        
+        #messages li {
+            padding: 5px 10px;
+            margin: 2px 0;
+            border-radius: 3px;
+        }
+        
+        #messages li.local {
+            background: #e3f2fd;
+            text-align: right;
+        }
+        
+        #messages li.remote {
+            background: #f1f8e9;
+        }
+        
+        #messages li.system {
+            background: #fff3e0;
+            font-style: italic;
+        }
+        
+        .peer-info {
+            font-weight: bold;
+            color: #1976d2;
+        }
+        
+        #messageForm {
+            display: flex;
+            gap: 10px;
+            margin-top: 10px;
+        }
+        
+        #messageInput {
+            flex: 1;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+        }
+        
+        #peersSection {
+            margin-top: 20px;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 5px;
+        }
+        
+        #connectedPeers {
+            list-style: none;
+            padding: 0;
+            margin: 10px 0 0 0;
+        }
+        
+        #connectedPeers li {
+            padding: 5px;
+            background: #e9ecef;
+            margin: 3px 0;
+            border-radius: 3px;
+            font-family: monospace;
+        }
+        
+        .status-info {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 5px;
+            background: #d4edda;
+            border: 1px solid #c3e6cb;
+        }
+
+        .peer-list {
+            margin-top: 20px;
+        }
+
+        #transport-info {
+            margin-top: 10px;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+            background: #f8f9fa;
+        }
+
+        #transport-summary {
+            font-weight: bold;
+        }
+
+        #peer-transport-details {
+            margin-top: 10px;
+        }
+
+        .transport-badge {
+            display: inline-block;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 0.8em;
+            font-weight: bold;
+            margin: 1px;
+        }
+
+        .transport-websocket {
+            background-color: #007bff;
+            color: white;
+        }
+
+        .transport-webtorrent {
+            background-color: #28a745;
+            color: white;
+        }
+
+        .transport-badge.preferred {
+            border: 2px solid #ffc107;
+        }
+
+        .multi-transport-indicator {
+            font-size: 1.2em;
+            margin-left: 5px;
+            title: "Multi-transport peer";
+        }
+
+        .peer-item {
+            margin: 5px 0;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            background: #f9f9f9;
+        }
+
+        .peer-item {
+            padding: 8px 12px;
+            margin: 4px 0;
+            background: #f5f5f5;
+            border-radius: 4px;
+            border-left: 3px solid #007bff;
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+        
+        .peer-id {
+            font-family: 'Courier New', monospace;
+            font-weight: bold;
+            color: #333;
+        }
+        
+        .peer-transport {
+            font-size: 0.85em;
+            color: #666;
+            font-weight: bold;
+        }
+        
+        .peer-status {
+            font-size: 0.8em;
+            color: #888;
+        }
+        
+        .connectivity-summary {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+            margin-bottom: 12px;
+            padding: 8px;
+            background: #f8f9fa;
+            border-radius: 4px;
+        }
+        
+        .transport-breakdown {
+            margin-bottom: 12px;
+        }
+        
+        .transport-item {
+            padding: 4px 8px;
+            margin: 2px 0;
+            background: #e9ecef;
+            border-radius: 3px;
+            border-left: 3px solid #28a745;
+        }
+        
+        .multi-transport-peers h4 {
+            margin: 8px 0 4px 0;
+            color: #007bff;
+        }
+        
+        .multi-peer-item {
+            padding: 4px 8px;
+            margin: 2px 0;
+            background: #d1ecf1;
+            border-radius: 3px;
+            border-left: 3px solid #17a2b8;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+        }
+        
+        .no-multi-transport {
+            padding: 8px;
+            color: #6c757d;
+            font-style: italic;
+            text-align: center;
+        }
     </style>
+    
+    <!-- WebTorrent CDN backup - load early -->
+    <script>
+        // Preload WebTorrent if available
+        (function() {
+            if (typeof window !== 'undefined' && !window.WebTorrent) {
+                console.log('Preloading WebTorrent...');
+                var script = document.createElement('script');
+                script.src = 'https://cdn.jsdelivr.net/npm/webtorrent@1.9.7/webtorrent.min.js';
+                script.crossOrigin = 'anonymous';
+                script.async = true;
+                script.onload = function() {
+                    if (window.WebTorrent) {
+                        console.log('WebTorrent preloaded successfully');
+                    } else {
+                        console.warn('WebTorrent script loaded but global not available');
+                    }
+                };
+                script.onerror = function() {
+                    console.warn('WebTorrent preload failed, will try alternatives');
+                };
+                document.head.appendChild(script);
+            }
+        })();
+    </script>
 </head>
 <body>
-    <div id="chatContainer">
-        <h2>P2PMesh Chat</h2>
+    <div class="container">
+        <h1>P2PMesh Chat Example</h1>
         
-        <div id="settingsPanel" style="margin-bottom: 20px; padding: 15px; background-color: #f0f0f0; border-radius: 5px;">
-            <h3>Connection Settings</h3>
-            <div style="margin-bottom: 10px;">
-                <label for="transportSelect">Transport:</label>
-                <select id="transportSelect" style="margin-left: 10px; padding: 5px;">
-                    <option value="websocket">WebSocket</option>
-                    <option value="webtorrent">WebTorrent</option>
+        <div class="settings-panel">
+            <h3>Transport Settings</h3>
+            
+            <div class="transport-settings">
+                <label for="transportSelect">Transport Type:</label>
+                <select id="transportSelect">
+                    <option value="websocket">WebSocket Only</option>
+                    <option value="webtorrent">WebTorrent Only</option>
+                    <option value="multi">Multiple Transports</option>
                 </select>
             </div>
             
-            <div id="websocketSettings" style="margin-bottom: 10px;">
-                <label for="signalingUrl">Signaling Server URL:</label>
-                <input type="text" id="signalingUrl" value="ws://localhost:8080" style="margin-left: 10px; padding: 5px; width: 200px;" />
+            <div id="websocketSettings" class="transport-settings">
+                <label for="signalingUrl">Primary WebSocket Server:</label>
+                <input type="url" id="signalingUrl" placeholder="ws://localhost:8080" value="ws://localhost:8080">
             </div>
             
-            <div id="webtorrentSettings" style="margin-bottom: 10px; display: none;">
+            <div id="multiTransportSettings" class="transport-settings" style="display: none;">
+                <label>Additional WebSocket Servers:</label>
+                <div id="additionalServersContainer"></div>
+                <button type="button" id="addServerBtn">Add Another WebSocket Server</button>
+            </div>
+            
+            <div id="webtorrentSettings" class="transport-settings" style="display: none;">
                 <label for="roomName">Room Name:</label>
-                <input type="text" id="roomName" value="default-room" style="margin-left: 10px; padding: 5px; width: 200px;" />
-                <small style="display: block; color: #666; margin-top: 5px;">Room name will be converted to a SHA1 hash for the WebTorrent swarm</small>
+                <input type="text" id="roomName" placeholder="my-chat-room" value="default-room">
             </div>
             
-            <button id="connectBtn" style="padding: 8px 16px; background-color: #28a745; color: white; border: none; border-radius: 4px; cursor: pointer;">Connect</button>
-            <button id="disconnectBtn" style="padding: 8px 16px; background-color: #dc3545; color: white; border: none; border-radius: 4px; cursor: pointer; display: none;">Disconnect</button>
+            <button id="connectBtn">Connect to Mesh</button>
+            <button id="disconnectBtn" style="display: none;">Disconnect</button>
         </div>
-        
-        <div id="peerIdDisplay">Your Peer ID: <span id="myPeerId">Not connected</span></div>
-        <div id="status">Status: Ready to connect...</div>
-        <ul id="messages"></ul>
-        <form id="messageForm" style="display: none;">
-            <input type="text" id="messageInput" placeholder="Type a message..." autocomplete="off" />
-            <button type="submit">Send</button>
-        </form>
+
+        <div class="status-info">
+            <div><strong>Peer ID:</strong> <span id="myPeerId">Not connected</span></div>
+            <div><strong>Status:</strong> <span id="status">Ready to connect</span></div>
+        </div>
+
         <div id="peersSection" style="display: none;">
-            <h3>Connected Peers:</h3>
+            <h3>Connected Peers</h3>
             <ul id="connectedPeers"></ul>
         </div>
+
+        <div class="peer-list">
+            <h3>Connected Peers (<span id="peer-count">0</span>)</h3>
+            <div id="peers"></div>
+            
+            <!-- Add transport connectivity info -->
+            <h3>Transport Connectivity</h3>
+            <div id="transport-info">
+                <div id="transport-summary">No transport information available</div>
+                <div id="peer-transport-details"></div>
+            </div>
+        </div>
+
+        <h3>Messages</h3>
+        <ul id="messages"></ul>
+
+        <form id="messageForm" style="display: none;">
+            <input type="text" id="messageInput" placeholder="Type a message..." required>
+            <button type="submit">Send</button>
+        </form>
     </div>
 
-    <!-- WebTorrent CDN for browser support -->
-    <script src="https://cdn.jsdelivr.net/npm/webtorrent@latest/webtorrent.min.js"></script>
     <script type="module" src="app.js"></script>
 </body>
 </html>

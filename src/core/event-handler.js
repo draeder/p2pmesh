@@ -8,24 +8,39 @@ export class MeshEventHandler {
   }
 
   setupTransportEventHandlers() {
-    if (typeof this.mesh.transportInstance.on !== 'function') {
-      console.warn('Transport does not support .on method for events.');
+    // Setup events for primary transport (backward compatibility)
+    if (this.mesh.transportInstance) {
+      this.setupSingleTransportEvents(this.mesh.transportInstance);
+    }
+    
+    // Setup events for all transports in multi-transport mode
+    if (this.mesh.transportInstances && this.mesh.transportInstances.length > 1) {
+      this.mesh.transportInstances.forEach((transport, index) => {
+        console.log(`Setting up events for transport ${index}: ${transport.constructor.name}`);
+        this.setupSingleTransportEvents(transport, index);
+      });
+    }
+  }
+
+  setupSingleTransportEvents(transport, transportIndex = 0) {
+    if (typeof transport.on !== 'function') {
+      console.warn(`Transport ${transportIndex} does not support .on method for events.`);
       return;
     }
 
     // Bootstrap peers from transport
-    this.mesh.transportInstance.on('bootstrap_peers', async ({ peers: newBootstrapPeers }) => {
+    transport.on('bootstrap_peers', async ({ peers: newBootstrapPeers }) => {
       if (newBootstrapPeers && newBootstrapPeers.length > 0) {
-        console.log('P2PMesh: Received bootstrap_peers from transport:', newBootstrapPeers);
+        console.log(`P2PMesh: Received bootstrap_peers from transport ${transportIndex}:`, newBootstrapPeers);
         const formattedPeers = newBootstrapPeers.map(p => ({ id: p.id, address: p.id }));
         await this.mesh.kademliaInstance.bootstrap(formattedPeers);
       }
     });
 
     // Peer discovery from transport
-    this.mesh.transportInstance.on('peer_joined', async ({ peerId }) => {
+    transport.on('peer_joined', async ({ peerId }) => {
       if (peerId && peerId !== this.mesh.localPeerId) {
-        console.log(`P2PMesh: Transport discovered new peer: ${peerId}`);
+        console.log(`P2PMesh: Transport ${transportIndex} discovered new peer: ${peerId}`);
         
         await this.mesh.kademliaInstance.bootstrap([{ id: peerId, address: peerId }]);
         
@@ -43,8 +58,8 @@ export class MeshEventHandler {
     });
 
     // Batched signals
-    this.mesh.transportInstance.on('batched_signals', ({ from, signals, batchTimestamp }) => {
-      console.log(`P2PMesh: Received batched signals from ${from} (${signals.length} signals)`);
+    transport.on('batched_signals', ({ from, signals, batchTimestamp }) => {
+      console.log(`P2PMesh: Received batched signals from ${from} (${signals.length} signals) via transport ${transportIndex}`);
       signals.forEach(signal => {
         this.handleIncomingSignal(from, signal);
       });

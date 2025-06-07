@@ -17,10 +17,14 @@ document.addEventListener('DOMContentLoaded', () => {
   const roomName = document.getElementById('roomName');
   const websocketSettings = document.getElementById('websocketSettings');
   const webtorrentSettings = document.getElementById('webtorrentSettings');
+  const multiTransportSettings = document.getElementById('multiTransportSettings');
+  const additionalServersContainer = document.getElementById('additionalServersContainer');
+  const addServerBtn = document.getElementById('addServerBtn');
   const connectBtn = document.getElementById('connectBtn');
   const disconnectBtn = document.getElementById('disconnectBtn');
 
   let mesh;
+  let additionalServerCount = 0;
   
   // Set to track disconnected peers to prevent duplicate disconnect messages
   const disconnectedPeers = new Set();
@@ -28,13 +32,39 @@ document.addEventListener('DOMContentLoaded', () => {
   // Handle transport selection UI
   transportSelect.addEventListener('change', () => {
     const selectedTransport = transportSelect.value;
+    websocketSettings.style.display = 'none';
+    webtorrentSettings.style.display = 'none';
+    multiTransportSettings.style.display = 'none';
+    
     if (selectedTransport === 'websocket') {
       websocketSettings.style.display = 'block';
-      webtorrentSettings.style.display = 'none';
+      multiTransportSettings.style.display = 'block';
     } else if (selectedTransport === 'webtorrent') {
-      websocketSettings.style.display = 'none';
       webtorrentSettings.style.display = 'block';
+    } else if (selectedTransport === 'multi') {
+      websocketSettings.style.display = 'block';
+      webtorrentSettings.style.display = 'block';
+      multiTransportSettings.style.display = 'block';
     }
+  });
+
+  // Add server button functionality
+  addServerBtn.addEventListener('click', () => {
+    additionalServerCount++;
+    const serverDiv = document.createElement('div');
+    serverDiv.className = 'additional-server';
+    serverDiv.innerHTML = `
+      <label>WebSocket Server ${additionalServerCount + 1}:</label>
+      <input type="url" class="additional-server-url" placeholder="wss://example.com/ws" value="ws://localhost:808${additionalServerCount}">
+      <button type="button" class="remove-server-btn">Remove</button>
+    `;
+    
+    const removeBtn = serverDiv.querySelector('.remove-server-btn');
+    removeBtn.addEventListener('click', () => {
+      additionalServersContainer.removeChild(serverDiv);
+    });
+    
+    additionalServersContainer.appendChild(serverDiv);
   });
 
   myPeerIdEl.textContent = 'Initializing ID...';
@@ -67,7 +97,237 @@ document.addEventListener('DOMContentLoaded', () => {
       li.textContent = 'No peers connected.';
       connectedPeersEl.appendChild(li);
     }
+    
+    // FIXED: Call the new transport-aware peer list update
+    updatePeerList();
   }
+
+  function updatePeerList() {
+    const connectedPeersDiv = document.getElementById('connectedPeers');
+    const peerCountDiv = document.getElementById('peerCount');
+    const transportConnectivityDiv = document.getElementById('transportConnectivity');
+
+    if (!mesh || !connectedPeersDiv || !peerCountDiv) return;
+
+    // FIXED: Get peers from the actual mesh.peers Map, not getConnectedPeers()
+    const meshPeers = mesh.peers ? Array.from(mesh.peers.keys()).filter(peerId => {
+      const peer = mesh.peers.get(peerId);
+      return peer && peer.connected;
+    }) : [];
+    
+    const peerConnections = mesh.getConnectionStates ? mesh.getConnectionStates() : {};
+    
+    peerCountDiv.textContent = `Connected Peers (${meshPeers.length})`;
+
+    // Get transport information
+    const transportBridge = mesh.transportBridge;
+    const transports = transportBridge ? transportBridge.getTransports() : [];
+    
+    // Count peers per transport
+    const transportPeerCounts = {};
+    const peerTransportInfo = {};
+    
+    // Initialize transport counts
+    transports.forEach(transport => {
+      const transportId = transport.getMultiTransportId ? transport.getMultiTransportId() : transport.getTransportType();
+      transportPeerCounts[transportId] = 0;
+    });
+
+    // FIXED: For each connected peer, determine transport by checking the mesh's connection tracking
+    meshPeers.forEach(peerId => {
+      const connectionState = peerConnections[peerId];
+      let peerTransports = [];
+      
+      // FIXED: Since we're using WebRTC through signaling, connected peers are likely through websocket transport
+      // Check each transport more aggressively
+      transports.forEach(transport => {
+        const transportId = transport.getMultiTransportId ? transport.getMultiTransportId() : transport.getTransportType();
+        
+        // FIXED: For WebSocket transport, if peer is connected via WebRTC, it came through WebSocket signaling
+        if (transportId.startsWith('websocket')) {
+          // All WebRTC connected peers in this setup came through WebSocket signaling
+          peerTransports.push(transportId);
+          transportPeerCounts[transportId]++;
+        }
+        
+        // Check WebtorrentTransport specifically
+        if (transport.hasPeerConnected && transport.hasPeerConnected(peerId)) {
+          if (!peerTransports.includes(transportId)) {
+            peerTransports.push(transportId);
+            transportPeerCounts[transportId]++;
+          }
+        } else if (transport.connectedPeers && transport.connectedPeers.has(peerId)) {
+          if (!peerTransports.includes(transportId)) {
+            peerTransports.push(transportId);
+            transportPeerCounts[transportId]++;
+          }
+        } else if (transport.getConnectedPeersWithTransport) {
+          const transportPeers = transport.getConnectedPeersWithTransport();
+          if (transportPeers.some(p => p.peerId === peerId)) {
+            if (!peerTransports.includes(transportId)) {
+              peerTransports.push(transportId);
+              transportPeerCounts[transportId]++;
+            }
+          }
+        }
+      });
+      
+      // FIXED: If no transport detected but peer is connected, assume primary transport
+      if (peerTransports.length === 0 && transports.length > 0) {
+        const primaryTransport = transports[0];
+        const primaryTransportId = primaryTransport.getMultiTransportId ? primaryTransport.getMultiTransportId() : primaryTransport.getTransportType();
+        peerTransports.push(primaryTransportId);
+        transportPeerCounts[primaryTransportId]++;
+        console.log(`TRANSPORT-DEBUG: Assuming peer ${peerId} connected via primary transport ${primaryTransportId}`);
+      }
+      
+      peerTransportInfo[peerId] = peerTransports;
+    });
+
+    // Update peer list with transport information
+    if (meshPeers.length === 0) {
+      connectedPeersDiv.innerHTML = '<div class="peer-item">No peers connected</div>';
+    } else {
+      connectedPeersDiv.innerHTML = meshPeers.map(peerId => {
+        const connectionState = peerConnections[peerId];
+        const transports = peerTransportInfo[peerId] || [];
+        const transportText = transports.length > 0 ? ` (${transports.join(', ')})` : ' (unknown transport)';
+        
+        const stateText = connectionState ? 
+          ` - ${connectionState.state} ${connectionState.channel ? '(data channel ready)' : ''}` : 
+          ' - Connected';
+        
+        return `<div class="peer-item">
+          <span class="peer-id">${peerId.substring(0, 8)}...${peerId.slice(-8)}</span>
+          <span class="peer-transport">${transportText}</span>
+          <span class="peer-status">${stateText}</span>
+        </div>`;
+      }).join('');
+    }
+
+    // Update transport connectivity section
+    if (transportConnectivityDiv) {
+      const totalPeers = meshPeers.length;
+      const activeTransports = transports.length;
+      const multiTransportPeers = Object.values(peerTransportInfo).filter(transports => transports.length > 1).length;
+      
+      let connectivityHTML = `
+        <div class="connectivity-summary">
+          <div><strong>Total Peers:</strong> ${totalPeers}</div>
+          <div><strong>Active Transports:</strong> ${activeTransports}</div>
+          <div><strong>Multi-Transport Peers:</strong> ${multiTransportPeers}</div>
+          <div><strong>Transport Bridge:</strong> ${transportBridge ? 'Active' : 'Inactive'}</div>
+        </div>
+        <div class="transport-breakdown">
+      `;
+      
+      // Show breakdown by transport
+      transports.forEach(transport => {
+        const transportId = transport.getMultiTransportId ? transport.getMultiTransportId() : transport.getTransportType();
+        const peerCount = transportPeerCounts[transportId] || 0;
+        connectivityHTML += `
+          <div class="transport-item">
+            <strong>${transportId}</strong>: ${peerCount} peers
+          </div>
+        `;
+      });
+      
+      connectivityHTML += '</div>';
+      
+      if (multiTransportPeers > 0) {
+        connectivityHTML += '<div class="multi-transport-peers"><h4>Multi-Transport Peers:</h4>';
+        Object.entries(peerTransportInfo).forEach(([peerId, transports]) => {
+          if (transports.length > 1) {
+            connectivityHTML += `
+              <div class="multi-peer-item">
+                ${peerId.substring(0, 8)}...${peerId.slice(-8)}: ${transports.join(', ')}
+              </div>
+            `;
+          }
+        });
+        connectivityHTML += '</div>';
+      } else {
+        connectivityHTML += '<div class="no-multi-transport">No multi-transport peers detected</div>';
+      }
+      
+      transportConnectivityDiv.innerHTML = connectivityHTML;
+    }
+}
+
+function updateTransportInfo() {
+    const transportSummaryElement = document.getElementById('transport-summary');
+    const peerTransportDetailsElement = document.getElementById('peer-transport-details');
+    
+    if (!mesh) {
+        if (transportSummaryElement) {
+            transportSummaryElement.innerHTML = `
+                <div class="transport-summary">
+                    <div class="stat"><strong>Status:</strong> Not Connected</div>
+                </div>
+            `;
+        }
+        return;
+    }
+    
+    const peerCount = mesh.peers ? mesh.peers.size : 0;
+    const hasTransportBridge = mesh.transportBridge != null;
+    const transportCount = mesh.transportInstances ? mesh.transportInstances.length : 1;
+    
+    if (transportSummaryElement) {
+        if (hasTransportBridge) {
+            const summary = mesh.transportBridge.getConnectivitySummary();
+            const peerTransportInfo = mesh.transportBridge.getPeerTransportInfo();
+            
+            transportSummaryElement.innerHTML = `
+                <div class="transport-summary">
+                    <div class="stat"><strong>Total Peers:</strong> ${summary.totalPeers}</div>
+                    <div class="stat"><strong>Active Transports:</strong> ${summary.totalTransports}</div>
+                    <div class="stat"><strong>Multi-Transport Peers:</strong> ${summary.multiTransportPeers}</div>
+                    <div class="stat"><strong>Transport Bridge:</strong> Active</div>
+                    <div class="transport-breakdown">
+                        ${Object.entries(summary.transportBreakdown).map(([transportId, count]) => 
+                            `<div class="transport-stat">
+                                <span class="transport-badge transport-${transportId.split('-')[0]}">${transportId}</span>: ${count} peers
+                            </div>`
+                        ).join('')}
+                    </div>
+                </div>
+            `;
+            
+            if (peerTransportDetailsElement) {
+                const multiTransportPeers = Object.entries(peerTransportInfo)
+                    .filter(([peerId, info]) => info.isMultiTransport);
+                
+                if (multiTransportPeers.length > 0) {
+                    peerTransportDetailsElement.innerHTML = `
+                        <h4>Multi-Transport Peers</h4>
+                        ${multiTransportPeers.map(([peerId, info]) => `
+                            <div class="peer-transport-detail">
+                                <span class="peer-id">${peerId}</span>
+                                <div class="transport-list">
+                                    ${info.transports.map(transportId => 
+                                        `<span class="transport-badge transport-${transportId.split('-')[0]} ${transportId === info.preferredTransport ? 'preferred' : ''}">${transportId}</span>`
+                                    ).join(' ')}
+                                </div>
+                            </div>
+                        `).join('')}
+                    `;
+                } else {
+                    peerTransportDetailsElement.innerHTML = '<p>No multi-transport peers detected</p>';
+                }
+            }
+        } else {
+            transportSummaryElement.innerHTML = `
+                <div class="transport-summary">
+                    <div class="stat"><strong>Total Peers:</strong> ${peerCount}</div>
+                    <div class="stat"><strong>Configured Transports:</strong> ${transportCount}</div>
+                    <div class="stat"><strong>Transport Bridge:</strong> ${transportCount > 1 ? 'Initializing...' : 'Single Transport Mode'}</div>
+                    <div class="stat"><strong>Bridge Status:</strong> ${hasTransportBridge ? 'Active' : 'Not Available'}</div>
+                </div>
+            `;
+        }
+    }
+}
 
     async function initMesh() {
     try {
@@ -80,16 +340,38 @@ document.addEventListener('DOMContentLoaded', () => {
           throw new Error('Please enter a signaling server URL');
         }
         
-        statusEl.textContent = `Status: Connecting to signaling server ${serverUrl}...`;
+        // Check for additional servers
+        const additionalUrls = Array.from(document.querySelectorAll('.additional-server-url'))
+          .map(input => input.value.trim())
+          .filter(url => url);
         
-        meshConfig = {
-          transportName: 'websocket',
-          transportOptions: {
-            signalingServerUrl: serverUrl
-          },
-          maxPeers: 3,
-          iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-        };
+        if (additionalUrls.length > 0) {
+          // Multi-WebSocket setup
+          const allUrls = [serverUrl, ...additionalUrls];
+          statusEl.textContent = `Status: Connecting to ${allUrls.length} WebSocket servers...`;
+          
+          meshConfig = {
+            transportConfigs: allUrls.map((url, index) => ({
+              name: 'websocket',
+              id: `websocket-${index}`,
+              options: { signalingServerUrl: url }
+            })),
+            maxPeers: 3,
+            iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+          };
+        } else {
+          // Single WebSocket setup
+          statusEl.textContent = `Status: Connecting to signaling server ${serverUrl}...`;
+          
+          meshConfig = {
+            transportName: 'websocket',
+            transportOptions: {
+              signalingServerUrl: serverUrl
+            },
+            maxPeers: 3,
+            iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+          };
+        }
       } else if (selectedTransport === 'webtorrent') {
         const roomNameValue = roomName.value.trim();
         if (!roomNameValue) {
@@ -109,6 +391,47 @@ document.addEventListener('DOMContentLoaded', () => {
           },
           maxPeers: 10 // WebTorrent can handle more peers
         };
+      } else if (selectedTransport === 'multi') {
+        // Multi-transport setup (WebSocket + WebTorrent)
+        const serverUrl = signalingUrl.value.trim();
+        const roomNameValue = roomName.value.trim();
+        
+        if (!serverUrl && !roomNameValue) {
+          throw new Error('Please enter at least one transport configuration');
+        }
+        
+        const transportConfigs = [];
+        
+        if (serverUrl) {
+          const additionalUrls = Array.from(document.querySelectorAll('.additional-server-url'))
+            .map(input => input.value.trim())
+            .filter(url => url);
+          
+          const allUrls = [serverUrl, ...additionalUrls];
+          allUrls.forEach((url, index) => {
+            transportConfigs.push({
+              name: 'websocket',
+              id: `websocket-${index}`,
+              options: { signalingServerUrl: url }
+            });
+          });
+        }
+        
+        if (roomNameValue) {
+          const roomId = await generateDeterministicRoomId(roomNameValue);
+          transportConfigs.push({
+            name: 'webtorrent',
+            id: 'webtorrent-0',
+            options: { infoHash: roomId }
+          });
+        }
+        
+        statusEl.textContent = `Status: Connecting to ${transportConfigs.length} transports...`;
+        
+        meshConfig = {
+          transportConfigs,
+          maxPeers: 10
+        };
       }
       
       mesh = await createMesh(meshConfig);
@@ -122,6 +445,12 @@ document.addEventListener('DOMContentLoaded', () => {
       transportSelect.disabled = true;
       signalingUrl.disabled = true;
       roomName.disabled = true;
+      addServerBtn.disabled = true;
+      
+      // Disable additional server inputs
+      document.querySelectorAll('.additional-server-url').forEach(input => {
+        input.disabled = true;
+      });
 
       mesh.on('peer:connect', (peerId) => {
         addMessage(`Connected to peer: ${peerId}`, 'system');
@@ -129,6 +458,8 @@ document.addEventListener('DOMContentLoaded', () => {
         // Reset the disconnected state when a peer connects/reconnects
         disconnectedPeers.delete(peerId);
         updateConnectedPeersList();
+        // FIXED: Force update transport info when peer connects
+        setTimeout(updateTransportInfo, 500);
       });
 
       mesh.on('peer:disconnect', (peerId) => {
@@ -138,6 +469,8 @@ document.addEventListener('DOMContentLoaded', () => {
           addMessage(`Disconnected from peer: ${peerId}`, 'system');
           statusEl.textContent = 'Status: Peer disconnected. Mesh active.';
           updateConnectedPeersList();
+          // FIXED: Force update transport info when peer disconnects
+          setTimeout(updateTransportInfo, 500);
         }
       });
 
@@ -257,6 +590,9 @@ document.addEventListener('DOMContentLoaded', () => {
       statusEl.textContent = 'Status: Mesh joined. Waiting for peers...';
       addMessage('Mesh joined. Your ID: ' + mesh.peerId, 'system');
       
+      // FIXED: Initialize transport info display
+      updateTransportInfo();
+      
       // Subscribe to the same 'chat_message' topic as Node.js clients to ensure consistency
       mesh.subscribe('chat_message', (message) => {
         console.log('FIXED: Received gossip message:', message);
@@ -314,6 +650,12 @@ document.addEventListener('DOMContentLoaded', () => {
         transportSelect.disabled = false;
         signalingUrl.disabled = false;
         roomName.disabled = false;
+        addServerBtn.disabled = false;
+        
+        // Re-enable additional server inputs
+        document.querySelectorAll('.additional-server-url').forEach(input => {
+          input.disabled = false;
+        });
         
         // Clear peers list
         connectedPeersEl.innerHTML = '';
@@ -348,6 +690,8 @@ document.addEventListener('DOMContentLoaded', () => {
   setInterval(() => {
     if (mesh) {
       updateConnectedPeersList();
+      // FIXED: Also update transport info periodically
+      updateTransportInfo();
     }
   }, 3000);
 });

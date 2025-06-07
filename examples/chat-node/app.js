@@ -20,6 +20,11 @@ for (let i = 0; i < args.length; i++) {
     case '-s':
       signalingServerUrl = args[++i];
       break;
+    case '--servers':
+    case '-S':
+      // Handle multiple servers for websocket transport
+      signalingServerUrl = args[++i];
+      break;
     case '--room':
     case '-r':
       roomName = args[++i];
@@ -29,21 +34,35 @@ for (let i = 0; i < args.length; i++) {
       console.log('P2PMesh Node.js Chat Example');
       console.log('');
       console.log('Options:');
-      console.log('  -t, --transport <transport>  Transport type: websocket or webtorrent (default: websocket)');
+      console.log('  -t, --transport <transport>  Transport type: websocket, webtorrent, or multi (default: websocket)');
       console.log('  -s, --server <url>          WebSocket signaling server URL (default: ws://localhost:8080)');
+      console.log('  -S, --servers <urls>        Multiple WebSocket server URLs (comma-separated)');
       console.log('  -r, --room <name>           Room name for WebTorrent transport (default: default-room)');
       console.log('  -h, --help                  Show this help message');
       console.log('');
       console.log('Examples:');
       console.log('  node app.js                                    # Use WebSocket transport');
       console.log('  node app.js --transport webtorrent             # Use WebTorrent transport');
-      console.log('  node app.js --transport webtorrent --room test # Use WebTorrent with custom room');
+      console.log('  node app.js --transport multi --room test      # Use both WebSocket and WebTorrent');
+      console.log('  node app.js --servers ws://localhost:8080,ws://localhost:8081  # Multiple WebSocket servers');
       console.log('  node app.js --server ws://localhost:9090       # Use custom WebSocket server');
       process.exit(0);
   }
 }
 
 let mesh;
+let additionalServers = [];
+
+// Parse multiple servers if provided
+for (let i = 0; i < args.length; i++) {
+  if (args[i] === '--servers' || args[i] === '-S') {
+    const serversArg = args[++i];
+    if (serversArg) {
+      additionalServers = serversArg.split(',').map(s => s.trim()).filter(s => s);
+    }
+    break;
+  }
+}
 
 // Set to track disconnected peers to prevent duplicate disconnect messages
 const disconnectedPeers = new Set();

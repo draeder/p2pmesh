@@ -10,16 +10,16 @@ export class WebSocketTransport extends InitiateTransport {
   /**
    * @param {string} signalingServerUrl - The URL of the WebSocket signaling server.
    */
-  constructor(signalingServerUrl) {
-    super();
+  constructor(signalingServerUrl, options = {}) {
+    super({ ...options, transportType: 'websocket' });
     if (!signalingServerUrl) {
       throw new Error('WebSocketTransport requires a signalingServerUrl.');
     }
     this.signalingServerUrl = signalingServerUrl;
     this.ws = null;
     this.localPeerId = null;
-    this.isConnected = false; // Add missing connection state tracking
-    this.pendingKademliaRpcs = new Map(); // For tracking Kademlia RPC replies
+    this.isConnected = false;
+    this.pendingKademliaRpcs = new Map();
   }
 
   async connect(localPeerId, options = {}) {
@@ -27,34 +27,38 @@ export class WebSocketTransport extends InitiateTransport {
       console.log('WebSocket already connected.');
       return;
     }
+    
+    // Call parent connect to start cleanup timer
+    await super.connect(localPeerId).catch(() => {}); // Ignore the "must be implemented" error
+    
     this.localPeerId = localPeerId;
     this.isConnected = false;
     
-    // If silentConnect option is provided, don't output connection messages
     const silentConnect = options.silentConnect || false;
     if (!silentConnect) {
-      console.log(`WebSocketTransport: Connecting to ${this.signalingServerUrl} as ${localPeerId}`);
+      const transportId = this._multiTransportId ? `[${this._multiTransportId}] ` : '';
+      console.log(`${transportId}WebSocketTransport: Connecting to ${this.signalingServerUrl} as ${localPeerId}`);
     }
 
     return new Promise((resolve, reject) => {
-      // FIXED: Add connection timeout for WebSocket as well
       const connectionTimeout = setTimeout(() => {
-        console.error('WebSocketTransport: Connection timeout');
+        const transportId = this._multiTransportId ? `[${this._multiTransportId}] ` : '';
+        console.error(`${transportId}WebSocketTransport: Connection timeout`);
         if (this.ws) {
           this.ws.close();
         }
         reject(new Error('WebSocket connection timeout'));
-      }, 15000); // 15 second timeout
+      }, 10000);
 
       this.ws = new WebSocket(this.signalingServerUrl);
 
       this.ws.onopen = () => {
         clearTimeout(connectionTimeout);
-        console.log(`WebSocketTransport: Connected to ${this.signalingServerUrl}`);
-        // Announce presence to the server
+        const transportId = this._multiTransportId ? `[${this._multiTransportId}] ` : '';
+        console.log(`${transportId}WebSocketTransport: Connected to ${this.signalingServerUrl}`);
         this.ws.send(JSON.stringify({ type: 'join', peerId: this.localPeerId }));
         this.isConnected = true;
-        this.emit('open'); // Emit an open event specific to this transport if needed
+        this.emit('open');
         resolve();
       };
 
@@ -78,13 +82,21 @@ export class WebSocketTransport extends InitiateTransport {
               if (message.peerId && message.peerId !== this.localPeerId) {
                 console.log(`WebSocketTransport: Peer ${message.peerId} joined, emitting connect_request.`);
                 // This could be a trigger to initiate a connection
-                this.emit('connect_request', { from: message.peerId });
+                this.emit('connect_request', { 
+                  from: message.peerId,
+                  transport: 'websocket',
+                  transportId: this._multiTransportId || 'websocket'
+                });
               }
               break;
             case 'peer_left': // Notification that a peer left
               console.log(`WebSocketTransport: Peer ${message.peerId} left.`);
               // Potentially emit an event to the mesh to handle this disconnection
-              this.emit('peer_left', { peerId: message.peerId });
+              this.emit('peer_left', { 
+                peerId: message.peerId,
+                transport: 'websocket',
+                transportId: this._multiTransportId || 'websocket'
+              });
               break;
             case 'error':
               console.error('WebSocketTransport: Server sent error:', message.message);
@@ -109,7 +121,13 @@ export class WebSocketTransport extends InitiateTransport {
             case 'bootstrap_peers': // List of peers from signaling server for Kademlia bootstrap
               if (message.peers) {
                 console.log(`WebSocketTransport: Received bootstrap_peers:`, message.peers);
-                this.emit('bootstrap_peers', { peers: message.peers });
+                this.emit('bootstrap_peers', { 
+                  peers: message.peers.map(peer => ({
+                    ...peer,
+                    transport: 'websocket',
+                    transportId: this._multiTransportId || 'websocket'
+                  }))
+                });
               }
               break;
             case 'kademlia_rpc_request': // An incoming Kademlia RPC request
@@ -188,12 +206,15 @@ export class WebSocketTransport extends InitiateTransport {
         console.log(`WebSocketTransport: Disconnected from ${this.signalingServerUrl}. Code: ${event.code}, Reason: ${event.reason}`);
         this.ws = null;
         this.isConnected = false;
-        this.emit('close'); // Emit a close event specific to this transport
+        this.emit('close');
       };
     });
   }
 
   async disconnect() {
+    // Call parent disconnect for cleanup
+    await super.disconnect().catch(() => {}); // Ignore the "must be implemented" error
+    
     if (this.ws) {
       console.log('WebSocketTransport: Disconnecting...');
       this.ws.send(JSON.stringify({ type: 'leave', peerId: this.localPeerId }));
@@ -260,6 +281,26 @@ export class WebSocketTransport extends InitiateTransport {
     console.log(`WebSocketTransport: Sending Kademlia RPC request to ${toPeerId} (rpcId: ${rpcId}):`, payload);
     this.ws.send(JSON.stringify(payload));
     return promise;
+  }
+
+  /**
+   * Gets connected peers with transport information
+   */
+  getConnectedPeersWithTransport() {
+    // For WebSocket transport, we can't easily track individual peer connections
+    // since it goes through a signaling server, but we can indicate transport availability
+    return [{
+      transport: 'websocket',
+      transportId: this._multiTransportId || 'websocket',
+      isSignalingServerConnected: this.isConnected
+    }];
+  }
+
+  /**
+   * Check if this transport can reach a peer (via signaling server)
+   */
+  canReachPeer(peerId) {
+    return this.isConnected;
   }
 
   // Method to get peer address, conceptual, might not be needed if peerId is enough for signaling server

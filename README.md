@@ -238,6 +238,30 @@ const mesh = await createMesh({
 await mesh.join();
 ```
 
+#### Using Multiple Transports (Multi-Transport)
+
+```javascript
+import { createMesh } from './src/index.js';
+
+const mesh = await createMesh({
+  transportConfigs: [
+    {
+      name: 'websocket',
+      id: 'websocket-primary',
+      options: { signalingServerUrl: 'ws://localhost:8080' }
+    },
+    {
+      name: 'websocket',
+      id: 'websocket-backup', 
+      options: { signalingServerUrl: 'ws://localhost:8081' }
+    }
+  ],
+  maxPeers: 10
+});
+
+await mesh.join();
+```
+
 ### Events
 
 The mesh instance emits various events that you can listen to:

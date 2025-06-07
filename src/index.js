@@ -9,7 +9,9 @@ import { P2PMesh } from './p2p-mesh.js';
  * @param {Array<object>} [options.bootstrapNodes=[]] - Initial Kademlia bootstrap nodes, e.g., [{id: 'peerId', address: 'ws://...'}] or transport-specific address info.
  * @param {Array<object>} [options.iceServers] - ICE servers configuration for WebRTC.
  * @param {object} options.transport - The transport instance for signaling.
+ * @param {Array<object>} options.transports - Array of transport instances for multi-transport setup.
  * @param {string} options.transportName - Named transport to use (alternative to transport).
+ * @param {Array} options.transportConfigs - Array of transport configurations for multi-transport.
  * @param {object} [options.transportOptions={}] - Options for named transport.
  * @param {number} [options.kademliaK=20] - Kademlia K parameter (number of peers per bucket).
  * @returns {object} P2PMesh instance.
@@ -23,32 +25,59 @@ export async function createMesh(options = {}) {
     bootstrapNodes = [], 
     iceServers, 
     transport, 
+    transports,
     transportName, 
+    transportConfigs,
     transportOptions = {}, 
     kademliaK 
   } = options;
   
   // Handle transport initialization
-  let transportInstance = transport;
-  if (!transportInstance) {
-    // If no direct transport instance is provided, try to use named transport
-    // Import the transport registry
+  let transportInstances = [];
+  
+  if (transports && Array.isArray(transports)) {
+    // Multiple transport instances provided directly
+    transportInstances = transports;
+  } else if (transportConfigs && Array.isArray(transportConfigs)) {
+    // Multiple transport configurations provided
+    const transportRegistry = await import('./transports/transport-registry.js').then(m => m.default);
+    transportInstances = await transportRegistry.createMultipleFromConfigs(transportConfigs);
+  } else if (transport) {
+    // Single transport instance provided
+    transportInstances = [transport];
+  } else if (transportName) {
+    // Single named transport specified
     const transportRegistry = await import('./transports/transport-registry.js').then(m => m.default);
     
-    if (transportName) {
-      // Named transport specified
-      if (!transportRegistry.has(transportName)) {
-        throw new Error(`Transport '${transportName}' is not registered in the transport registry`);
+    if (!(await transportRegistry.has(transportName))) {
+      throw new Error(`Transport '${transportName}' is not registered in the transport registry`);
+    }
+    
+    const transportInstance = await transportRegistry.createFromOptions(transportName, transportOptions);
+    if (!transportInstance) {
+      throw new Error(`Failed to create transport instance for '${transportName}'`);
+    }
+    transportInstances = [transportInstance];
+  } else {
+    throw new Error('Either transport instance(s), transport configurations, or a transport name must be provided');
+  }
+
+  if (transportInstances.length === 0) {
+    throw new Error('No valid transport instances could be created');
+  }
+
+  // Mark transports for multi-transport mode if more than one
+  if (transportInstances.length > 1) {
+    transportInstances.forEach((transport, index) => {
+      if (!transport._multiTransportId) {
+        transport.setMultiTransportId(`transport-${index}`);
       }
-      
-      // Use the new helper method for creating transports with options
-      transportInstance = transportRegistry.createFromOptions(transportName, transportOptions);
-      if (!transportInstance) {
-        throw new Error(`Failed to create transport instance for '${transportName}'`);
-      }
-    } else {
-      // No transport or transportName provided
-      throw new Error('Either a transport instance (options.transport) or a transport name (options.transportName) must be provided');
+    });
+  } else if (transportInstances.length === 1) {
+    // Even single transports should be marked for bridge compatibility
+    const transport = transportInstances[0];
+    if (!transport._multiTransportId) {
+      transport.setMultiTransportId('transport-0');
     }
   }
 
@@ -57,7 +86,8 @@ export async function createMesh(options = {}) {
     peerId,
     maxPeers,
     iceServers,
-    transport: transportInstance,
+    transport: transportInstances[0], // Primary transport for backward compatibility
+    transports: transportInstances, // All transports for multi-transport support
     kademliaK,
     bootstrapNodes
   });

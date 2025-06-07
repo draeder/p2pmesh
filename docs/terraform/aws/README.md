@@ -206,25 +206,23 @@ terraform apply
 Once deployed, use the AWS-specific transport in your client code:
 
 ```javascript
-import { registerAWSTransport } from '../src/transports/aws-websocket-transport.js';
-import { TransportFactory } from '../src/transport-factory.js';
-
-// Register the AWS transport
-registerAWSTransport(TransportFactory);
+import { createMesh } from '../src/index.js';
 
 // Get your WebSocket URL from Terraform output
 const websocketUrl = 'wss://your-api-id.execute-api.us-east-1.amazonaws.com/prod';
 
-// Create transport instance
-const transport = TransportFactory.create('aws-websocket', websocketUrl, {
-  stage: 'prod',
-  region: 'us-east-1',
-  heartbeatInterval: 30000
+// Use with named transport (recommended)
+const mesh = await createMesh({
+  transportName: 'aws-websocket',
+  transportOptions: {
+    url: websocketUrl,
+    stage: 'prod',
+    region: 'us-east-1',
+    heartbeatInterval: 30000
+  }
 });
 
-// Use with P2PMesh
-const mesh = new P2PMesh('your-peer-id', transport);
-await mesh.start();
+await mesh.join();
 ```
 
 ## Monitoring and Debugging

@@ -1,6 +1,7 @@
 // src/p2p-mesh.js
 import { MeshCore } from './core/mesh-core.js';
 import { MeshEventHandler } from './core/event-handler.js';
+import { TransportBridge } from './core/transport-bridge.js';
 
 /**
  * Main P2PMesh class that orchestrates all components
@@ -12,11 +13,15 @@ export class P2PMesh {
     this.maxPeers = options.maxPeers || 5;
     this.iceServers = options.iceServers;
     this.transportInstance = options.transport;
+    this.transportInstances = options.transports || (options.transport ? [options.transport] : []); // Support multiple transports
     this.bootstrapNodes = options.bootstrapNodes || [];
     
     // Initialize core and event handler
     this.core = new MeshCore(options);
     this.eventHandler = new MeshEventHandler(this);
+    
+    // Initialize transport bridge if multiple transports or multi-transport mode
+    this.transportBridge = null;
   }
 
   /**
@@ -27,6 +32,24 @@ export class P2PMesh {
     const { localPeerId, kademlia } = await this.core.initialize();
     this.localPeerId = localPeerId;
     this.kademliaInstance = kademlia;
+
+    // Initialize transport bridge if we have multiple transports
+    if (this.transportInstances.length > 1 || 
+        (this.transportInstances.length === 1 && this.transportInstances[0]._isMultiTransport)) {
+      console.log(`P2PMesh: Initializing transport bridge for ${this.transportInstances.length} transports`);
+      this.transportBridge = new TransportBridge({
+        localPeerId: this.localPeerId
+      });
+      
+      // Register all transports with the bridge
+      this.transportInstances.forEach((transport, index) => {
+        const transportId = transport.getMultiTransportId() || `transport-${index}`;
+        this.transportBridge.registerTransport(transportId, transport);
+      });
+      
+      // Set up bridge event forwarding
+      this.setupTransportBridgeEvents();
+    }
 
     // Set up event handlers
     this.eventHandler.setupTransportEventHandlers();
@@ -741,5 +764,53 @@ export class P2PMesh {
       const data = this.peerDiscovery.getReconnectionData();
       this.peerDiscovery.storeReconnectionData([...data.peers, ...peers]);
     }
+  }
+
+  /**
+   * Sets up transport bridge event handlers
+   */
+  setupTransportBridgeEvents() {
+    if (!this.transportBridge) return;
+    
+    // Forward transport bridge events to mesh events
+    this.transportBridge.on('peer_discovered', ({ peerId, transport, transportId }) => {
+      console.log(`P2PMesh: Transport bridge discovered peer ${peerId} via ${transportId}`);
+      this.eventHandler.emit('peer_discovered', { peerId, transport, transportId });
+    });
+    
+    this.transportBridge.on('peer_joined', ({ peerId, transport, transportId }) => {
+      console.log(`P2PMesh: Transport bridge peer joined ${peerId} via ${transportId}`);
+      this.eventHandler.emit('peer_joined', { peerId, transport, transportId });
+    });
+    
+    this.transportBridge.on('peer_left', ({ peerId, transport, transportId }) => {
+      console.log(`P2PMesh: Transport bridge peer left ${peerId} via ${transportId}`);
+      this.eventHandler.emit('peer_left', { peerId, transport, transportId });
+    });
+    
+    this.transportBridge.on('signal', ({ from, signal, transportId }) => {
+      console.log(`P2PMesh: Transport bridge signal from ${from} via ${transportId}`);
+      this.handleIncomingSignal(from, signal);
+    });
+    
+    this.transportBridge.on('connect_request', ({ from, transportId }) => {
+      console.log(`P2PMesh: Transport bridge connect request from ${from} via ${transportId}`);
+      this.handleConnectRequest(from);
+    });
+    
+    this.transportBridge.on('connection_rejected', ({ from, reason, alternativePeers, transportId }) => {
+      console.log(`P2PMesh: Transport bridge connection rejected by ${from} via ${transportId}`);
+      this.handleConnectionRejection(from, reason, alternativePeers);
+    });
+    
+    this.transportBridge.on('bootstrap_peers', ({ peers, transportId }) => {
+      console.log(`P2PMesh: Transport bridge bootstrap peers from ${transportId}:`, peers);
+      if (peers && peers.length > 0) {
+        const formattedPeers = peers.map(p => ({ id: p.id, address: p.id }));
+        this.kademliaInstance.bootstrap(formattedPeers).catch(error => {
+          console.error('Error bootstrapping from transport bridge peers:', error);
+        });
+      }
+    });
   }
 }

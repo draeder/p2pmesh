@@ -63,11 +63,43 @@ mesh = await createMesh({
   },
   // other options...
 });
+
+// Option 3: Using multiple transports (new feature)
+mesh = await createMesh({
+  transportConfigs: [
+    {
+      name: 'websocket',
+      id: 'websocket-primary',
+      options: { signalingServerUrl: 'ws://localhost:8080' }
+    },
+    {
+      name: 'websocket', 
+      id: 'websocket-backup',
+      options: { signalingServerUrl: 'ws://localhost:8081' }
+    },
+    {
+      name: 'webtorrent',
+      id: 'webtorrent-main',
+      options: { infoHash: 'your-room-hash' }
+    }
+  ]
+});
 ```
 
 ### Chat Node Example
 
-The Node.js example follows the same pattern, allowing you to choose either method.
+The Node.js example follows the same pattern, allowing you to choose either method, plus new multi-transport support:
+
+```bash
+# Single WebSocket
+node app.js --transport websocket --server ws://localhost:8080
+
+# Multiple WebSocket servers
+node app.js --servers ws://localhost:8080,ws://localhost:8081
+
+# Multi-transport (WebSocket + WebTorrent)
+node app.js --transport multi --server ws://localhost:8080 --room my-room
+```
 
 ## Available Transports
 
@@ -156,7 +188,7 @@ import { InitiateTransport } from '../transports/transport-interface.js';
 
 export class MyCustomTransport extends InitiateTransport {
   constructor(options = {}) {
-    super();
+    super(options);
     this.options = options;
     // Initialize your transport
   }

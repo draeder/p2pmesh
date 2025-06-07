@@ -1,157 +1,180 @@
 // src/transports/transport-registry.js
 
 /**
- * Transport Registry
- * Manages named transport implementations for P2PMesh.
- * 
- * This registry allows transports to be registered with a name and then
- * retrieved by name, making the system more flexible and allowing for
- * dynamic loading of transport modules.
+ * Transport Registry - Manages named transport instances
  */
-
 class TransportRegistry {
   constructor() {
     this.transports = new Map();
+    this.isInitialized = false;
+    this.initPromise = this.registerBuiltInTransports();
   }
 
   /**
-   * Register a transport implementation with a name.
-   * @param {string} name - The name to register the transport under.
-   * @param {Function} transportClass - The transport class constructor.
-   * @returns {void}
+   * Ensure registry is initialized before use
    */
-  register(name, transportClass) {
-    if (this.transports.has(name)) {
-      console.warn(`Transport with name '${name}' is already registered. Overwriting.`);
+  async ensureInitialized() {
+    if (!this.isInitialized) {
+      await this.initPromise;
     }
-    this.transports.set(name, transportClass);
   }
 
   /**
-   * Get a transport implementation by name.
-   * @param {string} name - The name of the transport to retrieve.
-   * @returns {Function|null} The transport class constructor or null if not found.
+   * Register built-in transports
    */
-  get(name) {
-    return this.transports.get(name) || null;
+  async registerBuiltInTransports() {
+    // Register WebSocket transport
+    try {
+      const { WebSocketTransport } = await import('./websocket-transport.js');
+      this.transports.set('websocket', WebSocketTransport);
+      console.log('Registered WebSocket transport');
+    } catch (error) {
+      console.warn('WebSocket transport not available:', error.message);
+    }
+    
+    // Register WebTorrent transport if available
+    try {
+      const { WebTorrentTransport } = await import('./webtorrent-transport.js');
+      this.transports.set('webtorrent', WebTorrentTransport);
+      console.log('Registered WebTorrent transport');
+    } catch (error) {
+      console.warn('WebTorrent transport not available:', error.message);
+    }
+
+    this.isInitialized = true;
+    const availableTransports = Array.from(this.transports.keys());
+    console.log('Transport registration completed. Available transports:', availableTransports);
+    return availableTransports;
   }
 
   /**
-   * Check if a transport with the given name is registered.
-   * @param {string} name - The name to check.
-   * @returns {boolean} True if the transport is registered, false otherwise.
+   * Register a transport class with a name
+   * @param {string} name - Transport name
+   * @param {class} TransportClass - Transport class constructor
    */
-  has(name) {
+  register(name, TransportClass) {
+    this.transports.set(name, TransportClass);
+  }
+
+  /**
+   * Check if a transport is registered
+   * @param {string} name - Transport name
+   * @returns {Promise<boolean>}
+   */
+  async has(name) {
+    await this.ensureInitialized();
     return this.transports.has(name);
   }
 
   /**
-   * Create a new instance of a transport by name with the given arguments.
-   * @param {string} name - The name of the transport to create.
-   * @param {...any} args - Arguments to pass to the transport constructor.
-   * @returns {object|null} A new instance of the transport or null if not found.
+   * Get a transport class by name
+   * @param {string} name - Transport name
+   * @returns {Promise<class|null>}
    */
-  create(name, ...args) {
-    const TransportClass = this.get(name);
-    if (!TransportClass) {
-      return null;
-    }
-    return new TransportClass(...args);
+  async get(name) {
+    await this.ensureInitialized();
+    return this.transports.get(name) || null;
   }
 
   /**
-   * Get all registered transport names.
-   * @returns {Array<string>} Array of registered transport names.
+   * Get all registered transport names
+   * @returns {Promise<Array<string>>}
    */
-  getNames() {
+  async getNames() {
+    await this.ensureInitialized();
     return Array.from(this.transports.keys());
   }
 
   /**
-   * Remove a transport from the registry.
-   * @param {string} name - The name of the transport to remove.
-   * @returns {boolean} True if the transport was removed, false otherwise.
+   * Create a transport instance from options object
+   * @param {string} name - Transport name
+   * @param {object} options - Transport options
+   * @returns {Promise<object|null>}
    */
-  unregister(name) {
-    return this.transports.delete(name);
+  async createFromOptions(name, options = {}) {
+    await this.ensureInitialized();
+    
+    const TransportClass = this.transports.get(name);
+    if (!TransportClass) {
+      const availableNames = Array.from(this.transports.keys());
+      console.error(`Transport '${name}' not found. Available: ${availableNames.join(', ')}`);
+      return null;
+    }
+
+    try {
+      // Handle different transport option patterns
+      if (name === 'websocket') {
+        return new TransportClass(options.signalingServerUrl || options.url, options);
+      } else if (name === 'webtorrent') {
+        return new TransportClass(options);
+      } else {
+        // Generic constructor with options
+        return new TransportClass(options);
+      }
+    } catch (error) {
+      console.error(`Error creating transport '${name}':`, error);
+      return null;
+    }
+  }
+
+  /**
+   * Create a transport instance with constructor arguments
+   * @param {string} name - Transport name
+   * @param {...any} args - Constructor arguments
+   * @returns {Promise<object|null>}
+   */
+  async create(name, ...args) {
+    await this.ensureInitialized();
+    
+    const TransportClass = this.transports.get(name);
+    if (!TransportClass) {
+      const availableNames = Array.from(this.transports.keys());
+      console.error(`Transport '${name}' not found. Available: ${availableNames.join(', ')}`);
+      return null;
+    }
+
+    try {
+      return new TransportClass(...args);
+    } catch (error) {
+      console.error(`Error creating transport '${name}':`, error);
+      return null;
+    }
+  }
+
+  /**
+   * Create multiple transport instances from configuration array
+   * @param {Array} configs - Array of transport configurations
+   * @returns {Promise<Array>} Array of transport instances
+   */
+  async createMultipleFromConfigs(configs) {
+    await this.ensureInitialized();
+    
+    const instances = [];
+    
+    for (const config of configs) {
+      if (!config.name) {
+        console.error('Transport config missing name:', config);
+        continue;
+      }
+      
+      const instance = await this.createFromOptions(config.name, config.options || {});
+      if (instance) {
+        // Use safe method to set multi-transport ID if provided
+        if (config.id) {
+          const { InitiateTransport } = await import('./transport-interface.js');
+          const success = InitiateTransport.safeSetMultiTransportId(instance, config.id);
+          if (!success) {
+            console.warn(`Failed to set multi-transport ID for ${config.name}`);
+          }
+        }
+        instances.push(instance);
+      }
+    }
+    
+    return instances;
   }
 }
 
-// Create a singleton instance
-const registry = new TransportRegistry();
-
-// Register the built-in transports
-import { WebSocketTransport } from './websocket-transport.js';
-import { WebTorrentTransport } from './webtorrent-transport.js';
-
-// Import adapters for reference
-import { WebTorrentAdapter } from '../adapters/webtorrent-adapter.js';
-
-// Register all built-in transports
-registry.register('websocket', WebSocketTransport);
-registry.register('webtorrent', WebTorrentTransport);
-
-// Keep track of available adapters
-registry.adapters = new Map();
-registry.adapters.set('webtorrent', WebTorrentAdapter);
-
-/**
- * Register an adapter for use with transports
- * @param {string} name - The name to register the adapter under
- * @param {Function} adapterClass - The adapter class constructor
- */
-registry.registerAdapter = function(name, adapterClass) {
-  this.adapters.set(name, adapterClass);
-};
-
-/**
- * Get an adapter by name
- * @param {string} name - The name of the adapter to retrieve
- * @returns {Function|null} The adapter class constructor or null if not found
- */
-registry.getAdapter = function(name) {
-  return this.adapters.get(name) || null;
-};
-
-/**
- * Create a new adapter instance
- * @param {string} name - The name of the adapter to create
- * @param {...any} args - Arguments to pass to the adapter constructor
- * @returns {object|null} A new instance of the adapter or null if not found
- */
-registry.createAdapter = function(name, ...args) {
-  const AdapterClass = this.getAdapter(name);
-  if (!AdapterClass) {
-    return null;
-  }
-  return new AdapterClass(...args);
-};
-
-/**
- * Helper function to get a transport instance with proper configuration
- * This is useful for backward compatibility with code that expects a transport instance
- * @param {string} name - The name of the transport to create
- * @param {object} options - Configuration options for the transport
- * @returns {object|null} A configured transport instance or null if not found
- */
-registry.createFromOptions = function(name, options = {}) {
-  if (!this.has(name)) {
-    return null;
-  }
-  
-  // Handle specific transport types with their expected parameters
-  if (name === 'websocket') {
-    // WebSocketTransport expects the signaling server URL as first parameter
-    return this.create(name, options.signalingServerUrl || options.url);
-  }
-  
-  if (name === 'webtorrent') {
-    // WebTorrentTransport expects infoHash as first parameter
-    return this.create(name, options.infoHash || options.roomId, options);
-  }
-  
-  // Default case: pass all options as arguments
-  return this.create(name, ...Object.values(options));
-};
-
-export default registry;
+// Create and export singleton instance
+const transportRegistry = new TransportRegistry();
+export default transportRegistry;

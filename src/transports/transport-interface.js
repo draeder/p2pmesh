@@ -1,7 +1,7 @@
 // src/transports/transport-interface.js
 
 /**
- * Initiate Transport Layer
+ * Base Transport Layer Interface
  * Defines the interface for transport mechanisms used for signaling and peer initiation.
  * 
  * Transport implementations should emit the following standard events:
@@ -27,12 +27,18 @@ export class InitiateTransport {
     this.eventListeners = new Map();
     this.connectionTimeouts = new Map();
     this.pendingConnections = new Set();
-    this.connectionStates = new Map(); // Track detailed connection states
-    this.connectionTimeout = options.connectionTimeout || 30000; // 30 seconds default
-    this.cleanupInterval = options.cleanupInterval || 60000; // 1 minute default
+    this.connectionStates = new Map();
+    this.connectionTimeout = options.connectionTimeout || 15000;
+    this.cleanupInterval = options.cleanupInterval || 60000;
     this.cleanupTimer = null;
-    this.evictionInProgress = new Set(); // Track peers being evicted
+    this.evictionInProgress = new Set();
     this.lastCleanupTime = 0;
+    this._multiTransportId = null;
+    this._isMultiTransport = false;
+    
+    // Explicitly prevent any AWS-related configurations
+    this._transportType = options.transportType || 'base';
+    this._preventAwsImports = true;
   }
 
   /**
@@ -362,11 +368,9 @@ export class InitiateTransport {
       if (state.state === 'connecting' && !this.pendingConnections.has(peerId)) {
         validation.orphanedStates.push(peerId);
       }
-    }
-    
-    // Check for eviction conflicts
-    for (const peerId of this.evictionInProgress) {
-      if (this.pendingConnections.has(peerId)) {
+      
+      // Check for eviction conflicts
+      if (this.evictionInProgress.has(peerId) && state.state === 'connecting') {
         validation.evictionConflicts.push(peerId);
       }
     }
@@ -375,77 +379,100 @@ export class InitiateTransport {
   }
 
   /**
-   * Requests a connection to a peer with proper state management.
-   * @param {string} peerId - The ID of the peer to connect to.
-   * @param {Object} options - Connection options.
-   * @returns {Promise<boolean>} True if connection was initiated successfully.
+   * Clears all connection timeouts.
    */
-  async requestPeerConnection(peerId, options = {}) {
-    // Check if peer is already being evicted
-    if (this.isPeerBeingEvicted(peerId)) {
-      console.log(`TRANSPORT: Cannot connect to ${peerId} - eviction in progress`);
-      return false;
+  clearAllConnectionTimeouts() {
+    for (const [peerId, timeoutId] of this.connectionTimeouts) {
+      clearTimeout(timeoutId);
     }
+    this.connectionTimeouts.clear();
+    this.pendingConnections.clear();
+  }
 
-    // Check if already connecting
-    if (this.isPeerConnecting(peerId)) {
-      console.log(`TRANSPORT: Already connecting to ${peerId}`);
-      return false;
-    }
+  /**
+   * Sets the multi-transport ID for this transport instance.
+   * @param {string} id - The multi-transport identifier.
+   */
+  setMultiTransportId(id) {
+    this._multiTransportId = id;
+    this._isMultiTransport = true;
+  }
 
-    try {
-      // Start connection tracking
-      this.startConnectionTimeout(peerId, {
-        initiator: true,
-        reason: options.reason || 'discovery',
-        ...options
-      });
+  /**
+   * Gets the multi-transport ID for this transport instance.
+   * @returns {string|null} The multi-transport identifier or null if not set.
+   */
+  getMultiTransportId() {
+    return this._multiTransportId;
+  }
 
-      // Emit connection request event for transport implementations to handle
-      this.emit('connect_request', {
-        peerId,
-        initiator: true,
-        timestamp: Date.now(),
-        options
-      });
+  /**
+   * Checks if this transport is part of a multi-transport setup.
+   * @returns {boolean} True if this is a multi-transport instance.
+   */
+  isMultiTransport() {
+    return this._isMultiTransport;
+  }
 
-      console.log(`TRANSPORT: Connection request initiated for ${peerId}`);
+  /**
+   * Gets the transport type to prevent unwanted imports.
+   * @returns {string} The transport type.
+   */
+  getTransportType() {
+    return this._transportType;
+  }
+
+  /**
+   * Validates that this transport doesn't trigger AWS imports.
+   * @returns {boolean} True if safe from AWS imports.
+   */
+  isAwsImportSafe() {
+    return this._preventAwsImports && this._transportType !== 'aws-websocket';
+  }
+
+  /**
+   * Static method to safely set multi-transport ID on any transport instance.
+   * @param {Object} transport - The transport instance.
+   * @param {string} id - The multi-transport identifier.
+   * @returns {boolean} True if successfully set, false otherwise.
+   */
+  static safeSetMultiTransportId(transport, id) {
+    if (transport && typeof transport.setMultiTransportId === 'function') {
+      transport.setMultiTransportId(id);
       return true;
-    } catch (error) {
-      console.error(`TRANSPORT: Failed to request connection to ${peerId}:`, error);
-      this.clearConnectionTimeout(peerId);
-      this.emit('connection_failed', { peerId, error: error.message, timestamp: Date.now() });
-      return false;
+    } else if (transport) {
+      // Fallback: manually set properties for older transport implementations
+      transport._multiTransportId = id;
+      transport._isMultiTransport = true;
+      console.warn(`Transport ${transport.constructor.name} doesn't implement setMultiTransportId, using fallback`);
+      return true;
     }
+    return false;
   }
 
   /**
-   * Handles successful peer connection.
-   * @param {string} peerId - The ID of the connected peer.
+   * Static method to safely get multi-transport ID from any transport instance.
+   * @param {Object} transport - The transport instance.
+   * @returns {string|null} The multi-transport identifier or null.
    */
-  handlePeerConnected(peerId) {
-    console.log(`TRANSPORT: Peer ${peerId} connected successfully`);
-    this.clearConnectionTimeout(peerId, 'connected');
-    this.emit('peer_joined', { peerId, timestamp: Date.now() });
+  static safeGetMultiTransportId(transport) {
+    if (transport && typeof transport.getMultiTransportId === 'function') {
+      return transport.getMultiTransportId();
+    } else if (transport && transport._multiTransportId) {
+      return transport._multiTransportId;
+    }
+    return null;
   }
 
   /**
-   * Handles failed peer connection.
-   * @param {string} peerId - The ID of the peer that failed to connect.
-   * @param {string} reason - The failure reason.
+   * Static method to check if a transport is multi-transport compatible.
+   * @param {Object} transport - The transport instance.
+   * @returns {boolean} True if the transport supports multi-transport mode.
    */
-  handlePeerConnectionFailed(peerId, reason = 'unknown') {
-    console.log(`TRANSPORT: Peer ${peerId} connection failed: ${reason}`);
-    this.clearConnectionTimeout(peerId, 'failed');
-    this.emit('connection_failed', { peerId, reason, timestamp: Date.now() });
-  }
-
-  /**
-   * Checks if a peer is currently in a connecting state.
-   * @param {string} peerId - The ID of the peer.
-   * @returns {boolean} True if the peer is currently connecting.
-   */
-  isPeerConnecting(peerId) {
-    return this.pendingConnections.has(peerId);
+  static isMultiTransportCompatible(transport) {
+    return transport && (
+      typeof transport.setMultiTransportId === 'function' ||
+      transport._multiTransportId !== undefined
+    );
   }
 }

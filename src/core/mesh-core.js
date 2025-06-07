@@ -15,6 +15,7 @@ export class MeshCore {
     this.maxPeers = options.maxPeers || 5;
     this.iceServers = options.iceServers;
     this.transportInstance = options.transport;
+    this.transportInstances = options.transports || (options.transport ? [options.transport] : []); // Support multiple transports
     this.kademliaK = options.kademliaK || KADEMLIA_K_VALUE;
     this.bootstrapNodes = options.bootstrapNodes || [];
     
@@ -36,8 +37,22 @@ export class MeshCore {
 
     console.log(`Initializing MeshCore with ID: ${this.localPeerId}`);
 
+    // Handle primary transport for backward compatibility
+    if (!this.transportInstance && this.transportInstances.length > 0) {
+      this.transportInstance = this.transportInstances[0];
+    }
+
+    // Mark transports as multi-transport if multiple instances
+    if (this.transportInstances.length > 1) {
+      this.transportInstances.forEach((transport, index) => {
+        if (!transport._multiTransportId) {
+          transport.setMultiTransportId(`transport-${index}`);
+        }
+      });
+    }
+
     // Handle WebTorrent transport connection
-    if (this.transportInstance.constructor.name === 'WebTorrentTransport') {
+    if (this.transportInstance && this.transportInstance.constructor.name === 'WebTorrentTransport') {
       console.log('Detected WebTorrent transport, connecting to get transport peer ID...');
       await this.transportInstance.connect(this.localPeerId);
       
